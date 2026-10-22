@@ -114,13 +114,18 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     exists.push(e.path)
     return { value: e.path in files }
   })
+  const lists: string[] = []
   const children = (dir: string, paths: string[]) => paths.filter(path => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'))
-  on('fs.list', ($, e) => ({
+  on('fs.list', ($, e) => {
+    lists.push(e.path)
+    return listOf(e.path)
+  })
+  const listOf = (dir: string) => ({
     value: [
-      ...children(e.path, Object.keys(files)).map(path => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
-      ...children(e.path, Object.keys(dirs)).map(path => ({ name: path.slice(e.path.length + 1), kind: 'dir' as const, size: 0, mtimeMs: dirs[path]!, isLink: false }))
+      ...children(dir, Object.keys(files)).map(path => ({ name: path.slice(dir.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
+      ...children(dir, Object.keys(dirs)).map(path => ({ name: path.slice(dir.length + 1), kind: 'dir' as const, size: 0, mtimeMs: dirs[path]!, isLink: false }))
     ]
-  }))
+  })
   on('fs.stat', ($, e) => {
     stats.push(e.path)
     if (made.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } }
@@ -141,7 +146,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
-  return { clock, runs, reads, exists, stats, blits, files, mtimes, tracked, session, asked, box }
+  return { clock, runs, reads, exists, stats, lists, blits, files, mtimes, tracked, session, asked, box }
 }
 
 const startSession = ($: Engine) => $.session.start({ cwd: '/project/app', surface: 'terminal', isInteractive: true })
@@ -772,4 +777,16 @@ test('an answer streaming in keeps one lookup a block, its chips those of the te
   // The same block, as more of it streams in: the chip follows the text, not an earlier lookup.
   await row.redraw(props('Saved as b.png, not a.'))
   expect(await row.find({ key: 'ref:0' })).toMatchObject({ props: { props: { label: 'b.png' } } })
+})
+
+test("a paste looked for again and again looks through every project's folder once in a while", async ($, on) => {
+  const root = '/tmp/claude-501'
+  const dirs: Record<string, number> = {}
+  for (let i = 0; i < 50; i++) dirs[`${root}/-project-${i}`] = 0
+  const w = world(on, { dirs })
+  w.box.text = '[Image #3]'
+  await startSession($)
+  await w.clock.advance(4000)
+  // Sixteen looks for the paste over three seconds; the temp folder listed once.
+  expect(w.lists.filter(path => path === root)).toHaveLength(1)
 })

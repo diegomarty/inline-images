@@ -93,6 +93,9 @@ let temp: string | undefined
 let sessionId: string | undefined
 let folder: string | undefined
 let cache: string | undefined
+// When the temp folder was last looked through for this session's, and how often it may be.
+let scannedAt = -Infinity
+const SCAN_MS = 10000
 const loaded = new Budget<Loaded>(LOADED_BUDGET, key => forget(key), key => isInUse(key))
 // When each picture was last drawn: one drawn lately stays in memory, over the budget if it must.
 const drawnAt = new Map<string, number>()
@@ -168,7 +171,11 @@ async function sessionFolder ($: Engine) {
   for (const name of names) {
     if (await $.fs.exists(`${root}/${name}/${id}/images`)) return (folder = `${root}/${name}/${id}`)
   }
-  // A project path too long for a folder name gets a hash after it: look for the session instead.
+  // A project path too long for a folder name gets a hash after it: look for the session instead,
+  // through every project's folder, once in a while: a pasted picture is looked for many times.
+  const now = await $.clock.now()
+  if (now - scannedAt < SCAN_MS) return undefined
+  scannedAt = now
   for (const entry of await $.fs.list(root).catch(() => [])) {
     if (entry.kind === 'dir' && (await $.fs.exists(`${root}/${entry.name}/${id}/images`))) return (folder = `${root}/${entry.name}/${id}`)
   }
@@ -243,6 +250,7 @@ function reset () {
   epoch++
   sessionId = undefined
   folder = undefined
+  scannedAt = -Infinity
   cache = undefined
   loaded.clear()
   failed.clear()
