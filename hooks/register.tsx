@@ -1,6 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, EventOf, ImageSource, Register, RenderElement, Timer } from 'claude-code'
 
+import { Budget } from './budget'
 import { decodeGif, isGif } from './gif'
 import { parseBmp, toCells } from './pixels'
 import type { Pixels } from './pixels'
@@ -24,6 +25,16 @@ const PIECE_BYTES = 2 * 1024 * 1024
 // How long a picture read from a file, the image index and a lookup that missed are trusted before
 // they are looked at again.
 const RECHECK_MS = 3000
+// What the pictures read, and their cells, may hold in memory together; past it the least recently
+// shown go (a GIF playing last), read again when next drawn.
+const LOADED_BUDGET = 96 * 1024 * 1024
+const CELLS_BUDGET = 16 * 1024 * 1024
+// The cache of a session gone this long is removed when the next session starts.
+const CACHE_DAYS = 7
+// The pictures a chip names are read before the pointer comes onto one: this many of an answer's,
+// each no larger than this.
+const PREFETCH_CHIPS = 8
+const PREFETCH_BYTES = 2 * 1024 * 1024
 const MAX_COLUMNS = 120
 // Under a tool row the transcript writes `  ⎿  `: the picture lines up with the text after it.
 const RESULT_INDENT = 5
@@ -65,14 +76,16 @@ let temp: string | undefined
 let sessionId: string | undefined
 let folder: string | undefined
 let cache: string | undefined
-const loaded = new Map<string, Loaded>()
+const loaded = new Budget<Loaded>(LOADED_BUDGET, key => forget(key), key => [...playing.values()].some(play => play.key === key))
 const loading = new Set<string>()
 // The pictures that could not be read, by key: not tried again on every redraw.
 const failed = new Set<string>()
 // Each picture read from a file (or looked for there): the file, its mtime then (-1: not there),
 // and when that was last looked at.
 const checked = new Map<string, { file: string; mtime: number; at: number }>()
-const cells = new Map<string, string>()
+const cells = new Budget<string>(CELLS_BUDGET)
+// The files of the chips already read, or let be, before the pointer came onto one.
+const prefetched = new Set<string>()
 // The pictures each block of an answer names, by its text, and whether every name was found; the
 // image files under the working folder; each with when it was looked up.
 const references = new Map<string, { at: number; found: Promise<{ files: string[]; isComplete: boolean }> }>()
@@ -118,7 +131,8 @@ async function tempFolder ($: Engine) {
 /** Where pasted images are stored for this session: `<temp>/<project path, dashed>/<session id>/images`. */
 async function sessionFolder ($: Engine) {
   if (folder) return folder
-  const id = await $.session.id()
+  await follow($)
+  const id = sessionId!
   const root = (temp ??= await tempFolder($))
   const names = new Set([await $.session.root(), await $.session.cwd()].map(path => path.replace(/[^a-zA-Z0-9]/g, '-')))
   for (const name of names) {
@@ -141,21 +155,24 @@ async function pastedFile ($: Engine, id: number) {
 /** The mod's own folder for this session, made once. */
 async function cacheFolder ($: Engine) {
   if (cache) return cache
-  const path = `${(temp ??= await tempFolder($))}/inline-images/${await $.session.id()}`
+  await follow($)
+  const path = `${(temp ??= await tempFolder($))}/inline-images/${sessionId}`
   if (isWindows) await $.process.run(['powershell', '-NoProfile', '-Command', 'New-Item -ItemType Directory -Force -Path $env:INLINE_IMAGES_DIR | Out-Null'], { env: { INLINE_IMAGES_DIR: path } })
   else await $.process.run(['mkdir', '-p', path])
   return (cache = path)
 }
 
 /**
- * Forgets what was read in another session: after /clear the pasted ids start again from 1. It runs
- * while rows draw, which may not write state: the state keeps the old session's pictures, under keys
- * of their own (a pasted image's key names its session), and a card open over a row no longer drawn.
+ * The session's id, asked once: `session.start` and `session.end` (a /clear among its reasons) set
+ * it and clear it, so a row drawing does not ask again.
  */
 async function follow ($: Engine) {
-  const id = await $.session.id()
-  if (id === sessionId) return
-  sessionId = id
+  sessionId ??= await $.session.id()
+}
+
+/** Forgets everything read: a new session, or a /clear, whose pasted ids start again from 1. */
+function reset () {
+  sessionId = undefined
   folder = undefined
   cache = undefined
   loaded.clear()
@@ -167,7 +184,43 @@ async function follow ($: Engine) {
   references.clear()
   blockRows.clear()
   rowOrder.clear()
+  prefetched.clear()
   index = undefined
+}
+
+/** A picture dropped from memory: its cells go too, and its animation stops. */
+function forget (key: string) {
+  for (const id of cells.keys()) if (id.startsWith(`${key}#`)) cells.delete(id)
+  for (const [id, play] of playing) {
+    if (play.key !== key) continue
+    play.timer?.cancel()
+    playing.delete(id)
+  }
+}
+
+/** The bytes a picture holds in memory: its frames' pixels, or the base64 it is sent as. */
+function weightOf ({ sources, pixels }: Loaded) {
+  const sent = (sources ?? []).reduce((sum, source) => sum + ('rgba' in source ? source.rgba.length : 'png' in source ? source.png.length : 256), 0)
+  return sent + (pixels ?? []).reduce((sum, frame) => sum + frame.data.length, 0)
+}
+
+/** Keeps a picture read, within the budget. */
+const keep = (key: string, value: Loaded) => loaded.set(key, value, weightOf(value))
+
+/** Removes the cache of this session, as it ends; and, at the start of one, those of sessions gone a week. */
+async function sweep ($: Engine, which: 'this' | 'old') {
+  if (isWindows) return
+  const root = `${(temp ??= await tempFolder($))}/inline-images`
+  if (which === 'this') {
+    if (sessionId) await $.process.run(['rm', '-rf', `${root}/${sessionId}`]).catch(() => undefined)
+    return
+  }
+  const now = await $.clock.now()
+  for (const entry of await $.fs.list(root).catch(() => [])) {
+    if (entry.kind === 'dir' && /^[\w-]+$/.test(entry.name) && now - entry.mtimeMs > CACHE_DAYS * 24 * 60 * 60 * 1000) {
+      await $.process.run(['rm', '-rf', `${root}/${entry.name}`]).catch(() => undefined)
+    }
+  }
 }
 
 /** Notes a transcript row the first time it is drawn. */
@@ -269,14 +322,14 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: stri
   const { width, height } = frames[0]!
   const delays = gif.frames.map(frame => frame.delay)
   if (graphics === 'none') {
-    loaded.set(key, { pixels: frames, delays })
+    keep(key, { pixels: frames, delays })
   } else if (graphics === 'bytes') {
-    loaded.set(key, { sources: frames.map(frame => ({ rgba: frame.data.toBase64(), width, height })), delays })
+    keep(key, { sources: frames.map(frame => ({ rgba: frame.data.toBase64(), width, height })), delays })
   } else {
     const dir = `${await cacheFolder($)}/${nameOf(key + version)}`
     await $.process.run(['mkdir', '-p', dir])
     await writeFrames($, dir, frames.map(frame => frame.data.toBase64()))
-    loaded.set(key, { sources: frames.map((_, i) => ({ file: `${dir}/${i}.rgba`, format: 'rgba' as const, width, height })), delays })
+    keep(key, { sources: frames.map((_, i) => ({ file: `${dir}/${i}.rgba`, format: 'rgba' as const, width, height })), delays })
   }
   return { width: gif.width, height: gif.height, frames: count }
 }
@@ -291,7 +344,7 @@ async function loadStill ($: Engine, key: string, file: string, head: Uint8Array
   if (graphics === 'none') {
     const own = await convert($, file, `${out}.bmp`, 'bmp', CELL_SOURCE_PIXELS)
     const pixels = parseBmp(await bytesOf($, `${out}.bmp`))
-    loaded.set(key, { pixels: [pixels], delays: [0] })
+    keep(key, { pixels: [pixels], delays: [0] })
     const size = pngSize(head) ?? own
     return { width: size.width, height: size.height, frames: 1 }
   }
@@ -305,11 +358,11 @@ async function loadStill ($: Engine, key: string, file: string, head: Uint8Array
   const shown = pngSize(await headOf($, png))
   if (!shown) throw new Error('could not read it')
   if (graphics === 'file') {
-    loaded.set(key, { sources: [{ file: png, format: 'png', generation: generationOf(mtime) }], delays: [0] })
+    keep(key, { sources: [{ file: png, format: 'png', generation: generationOf(mtime) }], delays: [0] })
   } else {
     const pngBytes = await bytesOf($, png)
     if (pngBytes.length > VIEW_BYTES) throw new Error('too large to send')
-    loaded.set(key, { sources: [{ png: pngBytes.toBase64() }], delays: [0] })
+    keep(key, { sources: [{ png: pngBytes.toBase64() }], delays: [0] })
   }
   const size = own ?? shown
   return { width: size.width, height: size.height, frames: 1 }
@@ -393,12 +446,7 @@ async function recheck ($: Engine, key: string) {
   checked.delete(key)
   loaded.delete(key)
   failed.delete(key)
-  for (const id of [...cells.keys()]) if (id.startsWith(`${key}#`)) cells.delete(id)
-  for (const [id, play] of playing) {
-    if (play.key !== key) continue
-    play.timer?.cancel()
-    playing.delete(id)
-  }
+  forget(key)
   await update($, pictures, all => {
     const { [key]: _, ...rest } = all
     return rest
@@ -424,7 +472,7 @@ function cellsOf (key: string, frame: number, columns: number, rows: number) {
   let painted = cells.get(id)
   if (painted === undefined) {
     painted = toCells(loaded.get(key)!.pixels![frame]!, columns, rows)
-    cells.set(id, painted)
+    cells.set(id, painted, painted.length)
   }
   return painted
 }
@@ -663,6 +711,14 @@ async function openFile ($: Engine, path: string) {
   await $.process.run(argv).catch(() => undefined)
 }
 
+/** Reads a chip's picture before the pointer comes onto it, a small one only, once. */
+async function prefetch ($: Engine, file: string) {
+  if (prefetched.has(file)) return
+  prefetched.add(file)
+  const size = await $.fs.stat(file).then(stat => stat.size, () => Infinity)
+  if (size <= PREFETCH_BYTES) await load($, `file:${file}`, async () => [{ file }])
+}
+
 /** A block of an answer: a paragraph, a list item with what is indented under it, a fence, a table; and whether a blank line comes before it. */
 type Block = { text: string; gap: boolean }
 
@@ -714,10 +770,24 @@ export const register: Register = (on, options) => {
     const isTmux = (await $.env.get('TMUX')) !== undefined
     graphics = isForced ? 'bytes' : isTmux ? 'none' : isNative ? (isRemote ? 'bytes' : 'file') : 'none'
     // A reload starts with nothing read: what the state says was read is read again.
-    sessionId = undefined
+    reset()
     await follow($)
     await update($, pictures, () => ({}))
     await update($, hovered, () => null)
+    void sweep($, 'old')
+    return result
+  })
+
+  // A session that ends takes its cache with it. After a /clear the process goes on under a new
+  // session, with no session.start: everything read is forgotten here.
+  on('session.end', async ($, e, next) => {
+    const result = await next(e)
+    await sweep($, 'this')
+    if (e.reason === 'clear') {
+      reset()
+      await update($, pictures, () => ({}))
+      await update($, hovered, () => null)
+    }
     return result
   })
 
@@ -816,7 +886,7 @@ export const register: Register = (on, options) => {
 
     /** The embedded pictures of a text, drawn: none for a link to a file that is not there. */
     /** The pictures a text embeds, drawn (none for a link to a file that is not there), and the targets drawn. */
-    const embeddedOf = (part: string, place: Site) => {
+    const embeddedOf = (part: string, place: Site, slot = 'image') => {
       const drawn: RenderElement[] = []
       const targets = new Set<string>()
       const seen = new Set<string>()
@@ -832,7 +902,7 @@ export const register: Register = (on, options) => {
         targets.add(target)
         if (seen.has(file)) continue
         seen.add(file)
-        drawn.push(pictureOf($, place, all, key, baseName(file)))
+        drawn.push(pictureOf($, place, all, key, baseName(file), slot))
       }
       return { drawn, targets }
     }
@@ -850,7 +920,9 @@ export const register: Register = (on, options) => {
       named.push((await namedIn($, block.text, cwd)).filter(file => !embedded.includes(file)))
     }
     const hasEmbedded = embeddedIn(text).length > 0
-    if (!hasEmbedded && named.every(files => files.length === 0)) return next(e)
+    const hasChips = named.some(files => files.length > 0)
+    if (!hasEmbedded && !hasChips) return next(e)
+    for (const file of named.flat().slice(0, PREFETCH_CHIPS)) void prefetch($, file)
 
     const now = await read($, hovered)
     const onScreen = e.props.onScreen
@@ -873,7 +945,8 @@ export const register: Register = (on, options) => {
         if (isHosting && chip === now!.element) open = { file, block: i }
         return { chip, file }
       })
-      const { drawn: pictures, targets } = embeddedOf(block.text, place)
+      // Each block's pictures have keys of their own: one picture embedded twice is two Images.
+      const { drawn: pictures, targets } = embeddedOf(block.text, place, `image-${i}`)
       // A picture drawn under the block is not written in it too, as its alt and path.
       const isDrawn = new Set(embeddedAt(block.text).filter(({ target }) => targets.has(target)).map(({ at }) => at))
       const shown = block.text.replace(MARKDOWN_IMAGE, (match: string, alt: string, target: string, at: number) => (isDrawn.has(at) ? '' : match)).trim()
@@ -892,9 +965,11 @@ export const register: Register = (on, options) => {
             </Box>
           )}
           {pictures}
-          <Box position="absolute" top={0} left={0} width={1} height="100%">
-            <Client key={`probe:${i}`} module="./probe.tsx" width={1} height="100%" />
-          </Box>
+          {hasChips && (
+            <Box position="absolute" top={0} left={0} width={1} height="100%">
+              <Client key={`probe:${i}`} module="./probe.tsx" width={1} height="100%" />
+            </Box>
+          )}
         </Box>
       )
     })
@@ -954,8 +1029,8 @@ export const register: Register = (on, options) => {
       const heights = blockRows.get(e.requestId) ?? []
       heights[Number(e.element.slice('probe:'.length))] = rows
       blockRows.set(e.requestId, heights)
-      // A card open over this answer moves with the blocks.
-      await update($, hovered, now => (now?.requestId === e.requestId ? { ...now } : now))
+      // A card open over this answer moves with the blocks; with none open, nothing draws again.
+      if ((await read($, hovered))?.requestId === e.requestId) await update($, hovered, now => (now ? { ...now } : now))
       return result
     }
     const path = /^ref:\d+$/.test(e.element) ? chipFiles.get(`${e.requestId}/${e.element}`) : undefined

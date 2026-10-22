@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { Budget } from './budget'
 import { countFrames, decodeGif, shrink } from './gif'
 
 // A PNG of one red pixel.
@@ -53,8 +54,9 @@ const padded = (base64: string, size: number) => {
  * processes it runs (head, dd, base64, sips, git) and what the engine draws. Like the engine's,
  * `fs.read` rejects a file of 4 MiB or more, and `fs.stat` one that is not there.
  */
-function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }> } = {}) {
-  const clock = mock.clock(on, { now: 0 })
+function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0 } = {}) {
+  const clock = mock.clock(on, { now })
+  const asked = { sessionId: 0 }
   mock.env(on, env)
   const session = { id: 's-1' }
   const mtimes: Record<string, number> = {}
@@ -65,7 +67,11 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   const blits: { requestId: string; key: string; source?: unknown; cells?: string }[] = []
   const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: session.id }))
+  on('session.id', () => {
+    asked.sessionId++
+    return { value: session.id }
+  })
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.root', () => ({ value: '/project/app' }))
   on('session.cwd', () => ({ value: '/project/app' }))
   on('process.run', ($, e) => {
@@ -95,9 +101,12 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     exists.push(e.path)
     return { value: e.path in files }
   })
+  const children = (dir: string, paths: string[]) => paths.filter(path => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'))
   on('fs.list', ($, e) => ({
-    value: Object.keys(files).filter(path => path.startsWith(`${e.path}/`) && !path.slice(e.path.length + 1).includes('/'))
-      .map(path => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false }))
+    value: [
+      ...children(e.path, Object.keys(files)).map(path => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
+      ...children(e.path, Object.keys(dirs)).map(path => ({ name: path.slice(e.path.length + 1), kind: 'dir' as const, size: 0, mtimeMs: dirs[path]!, isLink: false }))
+    ]
   }))
   on('fs.stat', ($, e) => {
     stats.push(e.path)
@@ -118,7 +127,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
-  return { clock, runs, reads, exists, stats, blits, files, mtimes, tracked, session }
+  return { clock, runs, reads, exists, stats, blits, files, mtimes, tracked, session, asked }
 }
 
 const startSession = ($: Engine) => $.session.start({ cwd: '/project/app', surface: 'terminal', isInteractive: true })
@@ -339,6 +348,8 @@ test("after /clear, a pasted [Image #1] is the new session's", async ($, on) => 
   const sent = (requestId: string) => $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'UserMessage', requestId, props: { text: 'look [Image #1]', origin: { kind: 'composer' }, isExpanded: false }, viewport: SCREEN })
   await sent('m-1')
   await w.clock.advance(4000)
+  // A /clear: the session ends, the process goes on under another id, with no session.start.
+  await $.session.end({ reason: 'clear', sessionId: 's-1', resume: { id: 's-1' } })
   w.session.id = 's-2'
   await sent('m-2')
   await w.clock.advance(10)
@@ -435,4 +446,68 @@ test('a card waits for every block above its chip to be measured', async ($, on)
   expect(await row.find({ key: 'card' })).toBeUndefined()
   for (const [i, rows] of [2, 2].entries()) await row.post({ rows }, { in: `probe:${i}` })
   expect(await row.find({ key: 'card' })).toMatchObject({ props: { top: 2 } })
+})
+
+// --- Lighter on the engine, the memory and the disk.
+
+test('the memory budget drops the least recently used, a pinned entry last, never the one just kept', () => {
+  const dropped: string[] = []
+  const budget = new Budget<string>(10, key => dropped.push(key), key => key === 'playing')
+  budget.set('playing', 'p', 4)
+  budget.set('a', 'a', 4)
+  budget.get('playing')
+  budget.set('b', 'b', 4)
+  expect(dropped).toEqual(['a'])
+  expect(budget.keys()).toEqual(['playing', 'b'])
+  budget.set('c', 'c', 8)
+  expect(dropped).toEqual(['a', 'b', 'playing'])
+  expect([budget.keys(), budget.bytes]).toEqual([['c'], 8])
+})
+
+test("the session's id is asked once, not on every row drawn", async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  for (const id of ['a-1', 'a-2', 'a-3']) await answer($, 'See shot.png.', id)
+  await resultRow($, 'tu-1', image(PNG))
+  expect(w.asked.sessionId).toBe(1)
+})
+
+test("a session that ends takes its cache with it; one starting removes those gone a week", async ($, on) => {
+  const day = 24 * 60 * 60 * 1000
+  const root = '/tmp/claude-501/inline-images'
+  const w = world(on, { now: 30 * day, dirs: { [`${root}/old`]: 20 * day, [`${root}/recent`]: 29 * day } })
+  await startSession($)
+  await w.clock.advance(10)
+  const removed = () => w.runs.filter(run => run.argv[0] === 'rm').map(run => run.argv.at(-1))
+  expect(removed()).toEqual([`${root}/old`])
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 's-1', resume: { id: 's-1' } })
+  expect(removed()).toEqual([`${root}/old`, `${root}/s-1`])
+})
+
+test('one picture embedded twice is two Images, each with a key of its own', async ($, on) => {
+  world(on, { files: { '/project/app/out/anim.gif': gif([0, 1]).toBase64() } })
+  await startSession($)
+  const text = 'Before: ![before](out/anim.gif)\n\nAfter: ![after](out/anim.gif)'
+  await answer($, text, 'a-1')
+  const row = await answer($, text, 'a-2')
+  const keys = (await row.findAll({ type: 'Image' })).map(image => image.key)
+  expect(keys).toHaveLength(2)
+  expect(new Set(keys).size).toBe(2)
+})
+
+test('an answer with pictures but no chips mounts no probes', async ($, on) => {
+  world(on, { files: { '/project/app/out/chart.png': PNG, '/project/app/shot.png': PNG } })
+  await startSession($)
+  const embedded = await answer($, 'Here:\n\n![chart](out/chart.png)', 'a-1')
+  expect(await embedded.find({ key: 'probe:0' })).toBeUndefined()
+  const named = await answer($, 'Saved as shot.png.', 'a-2')
+  expect(await named.find({ key: 'probe:0' })).toBeDefined()
+})
+
+test("a chip's picture is read before the pointer comes onto it", async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  await answer($, 'Saved as shot.png.', 'a-1')
+  await w.clock.advance(10)
+  expect(w.runs.some(run => run.argv[2]?.startsWith('head -c') && run.argv[3] === '/project/app/shot.png')).toBe(true)
 })
