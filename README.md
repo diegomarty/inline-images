@@ -23,35 +23,32 @@
   <code>/plugin marketplace add diegomarty/inline-images</code> · <code>/plugin install inline-images@inline-images</code>
 </p>
 
+<p align="center">
+  <img src="docs/demo.gif" alt="Illustration: Claude reads docs/media/sunset.gif, and the GIF plays in the terminal under its Read row" width="760">
+</p>
+
 ---
 
 A Claude Code mod: see pictures in the transcript, as the desktop app shows them. The images Claude reads, the ones you paste and the ones its answers embed are drawn under their rows; the ones an answer only names get a chip that shows the picture under the pointer; GIFs play.
-
-```text
-⏺ Read(screenshot.png)
-  ⎿  Read image (151KB)
-     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀      ← the picture, under the row
-     ▃▁▁▘▘▁▃▀▀▖▗▀▖▗▀▏▊▎▗▘▃▗▀▖▀▂▁▉▚▉▘▏▗▀▖▗▀▖▀▀
-```
 
 - **What Claude reads**: a `Read` of a PNG, JPEG, WebP or GIF shows the picture under its `⎿ Read image` line. A run of reads folded into one line (`Read 3 files`) shows each picture under it, named.
 - **What you paste**: a prompt you sent with `[Image #N]` in it shows its pictures under it, side by side.
 - **What Claude embeds**: an answer with `![alt](path)` to a picture on this machine shows it under the paragraph that embeds it. Links to the web, and to files that are not there, draw nothing.
 - **What Claude names**: an answer that mentions a picture (`docs/media/leads.gif`, or just `leads.gif`) gets a chip beside the paragraph or list item that names it. Put the pointer on a chip and the picture opens in a card over the answer; move it off and the card closes; click it and the picture opens in the system's viewer. A name with no folder is looked for among the files under the working folder (`git ls-files`, ignored files left out); a name that matches no file gets no chip.
 
-```text
-  ╭──────────────────────────────╮
-  │  (the picture)               │                ← the pointer on a chip
-  │ docs/media/leads-filtros.gif │
-  ╰──────────────────────────────╯
-● 1. Imagen: leads-filtros.gif (2,6 MB)           leads-filtros.gif
-  2. Imagen: intro-capitulo.gif (790 KB)          intro-capitulo.gif
-```
+<p align="center">
+  <img src="docs/chips.png" alt="Illustration: an answer lists three pictures, a chip beside each; the pointer on the first chip opens its picture in a card over the rows above" width="760">
+</p>
+
 - **GIFs play** while they show on screen, each frame for its own delay; scrolled away, they stop on the frame they were on.
 
 ## How it draws
 
 In Ghostty and kitty the terminal draws the picture itself, through the kitty graphics protocol: it reads the PNG, or each frame of a GIF, from a file, so no picture crosses Claude Code. `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` sends the bytes to a terminal Claude Code does not know draws pictures (iTerm2 3.5 and later, under fullscreen rendering), shrunk to 1024 pixels and 2 MB. Elsewhere the picture is drawn in colored block elements, GIFs too: each cell sampled at eight by eight points, in linear light, in any terminal with true color. Cells are coarse: a screenshot of text shows its layout, not text you can read.
+
+<p align="center">
+  <img src="docs/pixels-and-cells.png" alt="Illustration: the same picture under a Read row, in pixels in Ghostty and kitty, and in colored cells in any other terminal with true color" width="760">
+</p>
 
 A picture takes as many cells as fit its shape, never much more than its own size, up to the **Picture height** option (`/config`, 12 rows by default) and 120 columns.
 
@@ -103,6 +100,11 @@ claude --plugin-dir .      # a session with the mod loaded from this folder
 
 GitHub Actions run the same checks: [CI](.github/workflows/ci.yml) on every push to `main` and every pull request, on the Claude Code version the plugin is built for; [Latest Claude Code](.github/workflows/latest-claude-code.yml) every Monday on the newest one, opening an issue when they fail (the mod API is early access); and [Release](.github/workflows/release.yml) on a `v<version>` tag that matches `plugin.json`, which makes the GitHub release. Dependabot keeps the actions up to date.
 
-The icon, [`.claude-plugin/icon.png`](.claude-plugin/icon.png), is drawn by [`scripts/make-icon.py`](scripts/make-icon.py): `python3 scripts/make-icon.py .claude-plugin/icon.png` (needs Pillow).
+The icon, [`.claude-plugin/icon.png`](.claude-plugin/icon.png), and the illustrations in [`docs/`](docs) are drawn by scripts, from the same pieces ([`scripts/art.py`](scripts/art.py)); they need Pillow:
+
+```bash
+python3 scripts/make-icon.py .claude-plugin/icon.png
+python3 scripts/make-readme-images.py docs
+```
 
 MIT © DiegoMarty. [`hooks/pixels.ts`](hooks/pixels.ts) and [`hooks/chip.tsx`](hooks/chip.tsx) come from [midudev/better-claude](https://github.com/midudev/better-claude), MIT © Miguel Ángel Durán (midudev).
