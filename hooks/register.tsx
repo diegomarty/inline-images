@@ -92,6 +92,8 @@ const isInUse = (key: string) => Date.now() - (drawnAt.get(key) ?? -Infinity) < 
 const loading = new Set<string>()
 // The pictures that could not be read, by key: not tried again on every redraw.
 const failed = new Set<string>()
+// Which session the mod reads for: a load started in an earlier one keeps nothing it read.
+let epoch = 0
 // Each picture read from a file (or looked for there): the file, its mtime then (-1: not there),
 // and when that was last looked at.
 const checked = new Map<string, { file: string; mtime: number; at: number }>()
@@ -147,8 +149,7 @@ async function tempFolder ($: Engine) {
 /** Where pasted images are stored for this session: `<temp>/<project path, dashed>/<session id>/images`. */
 async function sessionFolder ($: Engine) {
   if (folder) return folder
-  await follow($)
-  const id = sessionId!
+  const id = await follow($)
   const root = (temp ??= await tempFolder($))
   const names = new Set([await $.session.root(), await $.session.cwd()].map(path => path.replace(/[^a-zA-Z0-9]/g, '-')))
   for (const name of names) {
@@ -203,8 +204,8 @@ async function track ($: Engine, text: string) {
  * not there, writes a file at the folder's path, says nothing, and every write after it fails.
  */
 async function cacheFolder ($: Engine) {
-  await follow($)
-  const path = cache ?? `${(temp ??= await tempFolder($))}/inline-images/${sessionId}`
+  const id = await follow($)
+  const path = cache ?? `${(temp ??= await tempFolder($))}/inline-images/${id}`
   const kind = await $.fs.stat(path).then(stat => stat.kind, () => undefined)
   if (kind === 'dir') return (cache = path)
   if (isWindows) await $.process.run(['powershell', '-NoProfile', '-Command', 'New-Item -ItemType Directory -Force -Path $env:INLINE_IMAGES_DIR | Out-Null'], { env: { INLINE_IMAGES_DIR: path } })
@@ -221,11 +222,12 @@ async function cacheFolder ($: Engine) {
  * it and clear it, so a row drawing does not ask again.
  */
 async function follow ($: Engine) {
-  sessionId ??= await $.session.id()
+  return (sessionId ??= await $.session.id())
 }
 
 /** Forgets everything read: a new session, or a /clear, whose pasted ids start again from 1. */
 function reset () {
+  epoch++
   sessionId = undefined
   folder = undefined
   cache = undefined
@@ -264,14 +266,16 @@ function weightOf ({ sources, pixels }: Loaded) {
 /** Keeps a picture read, within the budget. */
 const keep = (key: string, value: Loaded) => loaded.set(key, value, weightOf(value))
 
-/** Removes the cache of this session, as it ends; and, at the start of one, those of sessions gone a week. */
-async function sweep ($: Engine, which: 'this' | 'old') {
+/** Removes the cache of a session that ended. */
+async function sweepEnded ($: Engine, id: string) {
+  if (isWindows || !/^[\w-]+$/.test(id)) return
+  await $.process.run(['rm', '-rf', `${(temp ??= await tempFolder($))}/inline-images/${id}`]).catch(() => undefined)
+}
+
+/** Removes, as a session starts, the caches of sessions gone a week. */
+async function sweepOld ($: Engine) {
   if (isWindows) return
   const root = `${(temp ??= await tempFolder($))}/inline-images`
-  if (which === 'this') {
-    if (sessionId) await $.process.run(['rm', '-rf', `${root}/${sessionId}`]).catch(() => undefined)
-    return
-  }
   const now = await $.clock.now()
   for (const entry of await $.fs.list(root).catch(() => [])) {
     if (entry.kind === 'dir' && /^[\w-]+$/.test(entry.name) && now - entry.mtimeMs > CACHE_DAYS * 24 * 60 * 60 * 1000) {
@@ -370,7 +374,7 @@ async function bytesOf ($: Engine, file: string, size?: number) {
 const generationOf = (mtime: number) => Math.floor(mtime / 1000) % 2147483647
 
 /** A GIF's frames, shrunk to fit the budget as they are decoded, as the terminal is shown them. */
-async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: string): Promise<Picture> {
+async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: string): Promise<[Picture, Loaded]> {
   // Every frame together within the budget: a long animation is shrunk further.
   const gif = decodeGif(bytes, MAX_FRAMES, (w, h, count) =>
     Math.max(1, Math.min(FRAME_PIXELS, Math.floor(Math.sqrt(FRAME_BUDGET / 4 / Math.max(1, count)) * Math.max(w, h) / Math.sqrt(w * h)))))
@@ -378,17 +382,13 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: stri
   const count = frames.length
   const { width, height } = frames[0]!
   const delays = gif.frames.map(frame => frame.delay)
-  if (graphics === 'none') {
-    keep(key, { pixels: frames, delays })
-  } else if (graphics === 'bytes') {
-    keep(key, { sources: frames.map(frame => ({ rgba: frame.data.toBase64(), width, height })), delays })
-  } else {
-    const dir = `${await cacheFolder($)}/${nameOf(key + version)}`
-    await $.process.run(['mkdir', '-p', dir])
-    await writeFrames($, dir, frames.map(frame => frame.data.toBase64()))
-    keep(key, { sources: frames.map((_, i) => ({ file: `${dir}/${i}.rgba`, format: 'rgba' as const, width, height })), delays })
-  }
-  return { width: gif.width, height: gif.height, frames: count }
+  const picture = { width: gif.width, height: gif.height, frames: count }
+  if (graphics === 'none') return [picture, { pixels: frames, delays }]
+  if (graphics === 'bytes') return [picture, { sources: frames.map(frame => ({ rgba: frame.data.toBase64(), width, height })), delays }]
+  const dir = `${await cacheFolder($)}/${nameOf(key + version)}`
+  await $.process.run(['mkdir', '-p', dir])
+  await writeFrames($, dir, frames.map(frame => frame.data.toBase64()))
+  return [picture, { sources: frames.map((_, i) => ({ file: `${dir}/${i}.rgba`, format: 'rgba' as const, width, height })), delays }]
 }
 
 /**
@@ -396,14 +396,13 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: stri
  * is its own (a PNG's header, else the converter's), not the size it was shrunk to: it decides how
  * many cells it takes.
  */
-async function loadStill ($: Engine, key: string, file: string, head: Uint8Array, bytes: number, mtime: number, version: string): Promise<Picture> {
+async function loadStill ($: Engine, key: string, file: string, head: Uint8Array, bytes: number, mtime: number, version: string): Promise<[Picture, Loaded]> {
   const out = `${await cacheFolder($)}/${nameOf(key + version)}`
   if (graphics === 'none') {
     const own = await convert($, file, `${out}.bmp`, 'bmp', CELL_SOURCE_PIXELS)
     const pixels = parseBmp(await bytesOf($, `${out}.bmp`))
-    keep(key, { pixels: [pixels], delays: [0] })
     const size = pngSize(head) ?? own
-    return { width: size.width, height: size.height, frames: 1 }
+    return [{ width: size.width, height: size.height, frames: 1 }, { pixels: [pixels], delays: [0] }]
   }
   let png = file
   let own = pngSize(head)
@@ -414,15 +413,12 @@ async function loadStill ($: Engine, key: string, file: string, head: Uint8Array
   }
   const shown = pngSize(await headOf($, png))
   if (!shown) throw new Error('could not read it')
-  if (graphics === 'file') {
-    keep(key, { sources: [{ file: png, format: 'png', generation: generationOf(mtime) }], delays: [0] })
-  } else {
-    const pngBytes = await bytesOf($, png)
-    if (pngBytes.length > VIEW_BYTES) throw new Error('too large to send')
-    keep(key, { sources: [{ png: pngBytes.toBase64() }], delays: [0] })
-  }
   const size = own ?? shown
-  return { width: size.width, height: size.height, frames: 1 }
+  const picture = { width: size.width, height: size.height, frames: 1 }
+  if (graphics === 'file') return [picture, { sources: [{ file: png, format: 'png', generation: generationOf(mtime) }], delays: [0] }]
+  const pngBytes = await bytesOf($, png)
+  if (pngBytes.length > VIEW_BYTES) throw new Error('too large to send')
+  return [picture, { sources: [{ png: pngBytes.toBase64() }], delays: [0] }]
 }
 
 /** Where a picture is read from: a file, or bytes the transcript holds (`ext` naming their kind). */
@@ -430,8 +426,11 @@ type Origin = { file: string } | { base64: string; ext: string }
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
+/** What a load read: the picture, what it is drawn from, its file, and that file's mtime (a file's). */
+type Read = { picture: Picture; value: Loaded; file: string; mtime?: number }
+
 /** Reads a picture from one origin. */
-async function loadFrom ($: Engine, key: string, origin: Origin, now: number): Promise<Picture> {
+async function loadFrom ($: Engine, key: string, origin: Origin): Promise<Read> {
   let file: string
   let size: number
   let mtime = 0
@@ -443,7 +442,6 @@ async function loadFrom ($: Engine, key: string, origin: Origin, now: number): P
     if (stat.size > MAX_FILE_BYTES) throw new Error('larger than 32 MB')
     size = stat.size
     mtime = stat.mtimeMs
-    checked.set(key, { file, mtime, at: now })
   } else {
     file = `${await cacheFolder($)}/${nameOf(key)}.source.${origin.ext}`
     await writeBytes($, file, origin.base64)
@@ -451,8 +449,8 @@ async function loadFrom ($: Engine, key: string, origin: Origin, now: number): P
   }
   const version = `@${mtime}`
   const head = await headOf($, file)
-  sourceFiles.set(key, file)
-  return isGif(head) ? loadGif($, key, await bytesOf($, file, size), version) : loadStill($, key, file, head, size, mtime, version)
+  const [picture, value] = isGif(head) ? await loadGif($, key, await bytesOf($, file, size), version) : await loadStill($, key, file, head, size, mtime, version)
+  return { picture, value, file, ...('file' in origin && { mtime }) }
 }
 
 /**
@@ -463,17 +461,20 @@ async function loadFrom ($: Engine, key: string, origin: Origin, now: number): P
 async function load ($: Engine, key: string, from: () => Promise<Origin[]>) {
   if (loaded.has(key) || loading.has(key) || failed.has(key)) return
   loading.add(key)
-  let picture: Picture | undefined
+  const mine = epoch
+  let read: Read | undefined
+  let missing: string | undefined
   let reason = 'not found'
+  let now = 0
   try {
-    const now = await $.clock.now()
+    now = await $.clock.now()
     for (const origin of await from()) {
       try {
-        picture = await loadFrom($, key, origin, now)
+        read = await loadFrom($, key, origin)
         break
       } catch (error) {
         reason = messageOf(error)
-        if ('file' in origin && !checked.has(key)) checked.set(key, { file: origin.file, mtime: -1, at: now })
+        if ('file' in origin) missing ??= origin.file
       }
     }
   } catch (error) {
@@ -481,8 +482,17 @@ async function load ($: Engine, key: string, from: () => Promise<Origin[]>) {
   } finally {
     loading.delete(key)
   }
-  if (!picture) {
+  // The session ended meanwhile (a /clear, a resume): what this load read is not the new one's.
+  if (mine !== epoch) return
+  let picture: Picture
+  if (read) {
+    keep(key, read.value)
+    sourceFiles.set(key, read.file)
+    if (read.mtime !== undefined) checked.set(key, { file: read.file, mtime: read.mtime, at: now })
+    picture = read.picture
+  } else {
     failed.add(key)
+    if (missing && !checked.has(key)) checked.set(key, { file: missing, mtime: -1, at: now })
     picture = { error: reason }
   }
   // Read in the background: a module unloaded meanwhile has no state to write to.
@@ -866,7 +876,7 @@ export const register: Register = (on, options) => {
     await follow($)
     await update($, pictures, () => ({}))
     await update($, hovered, () => null)
-    void sweep($, 'old')
+    void sweepOld($)
     // A reload keeps what /images set.
     apply(await read($, view))
     await track($, (await $.prompt.read()).text)
@@ -902,8 +912,9 @@ export const register: Register = (on, options) => {
   // and must not keep using the cache just removed.
   on('session.end', async ($, e, next) => {
     const result = await next(e)
-    await sweep($, 'this')
+    // Forgotten before the cache goes, so nothing drawn meanwhile writes into the one going.
     reset()
+    await sweepEnded($, e.sessionId)
     await update($, pictures, () => ({}))
     await update($, hovered, () => null)
     return result
