@@ -54,7 +54,7 @@ Then try the change in a real session, in a terminal that draws pictures and in 
 
 - **Every fix comes with a test** that fails without it, and every feature with tests of what it draws.
 - **The `world` in `register.test.tsx` stands for what is beneath the mod**: files, processes (`head`, `dd`, `sips`, `git`), the prompt box, and what the engine draws. It behaves like the engine where that matters. For example, `fs.read` rejects files of 4 MiB or more, and `fs.stat` rejects missing files. If your change runs a new process, teach the `world` to answer it the way the real one does.
-- **Check a system command for real at least once.** Run it on your machine with the same arguments the mod uses. `sips`, for example, behaves in ways a mock would not guess.
+- **Check a system command for real at least once.** Run it on your machine with the same arguments the mod uses. `sips`, for example, behaves in ways a mock would not guess. `node --experimental-strip-types scripts/system-check.ts` runs every operation of [`hooks/system.ts`](hooks/system.ts) for real on the system it is on; CI runs it on macOS, Ubuntu and Windows.
 
 ### Style
 

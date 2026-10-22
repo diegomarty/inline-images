@@ -16,3 +16,27 @@ permissions:
 jobs:
   checks:
     uses: ./.github/workflows/checks.yml
+
+  # The system layer run for real, where the mod runs: sips on macOS, ImageMagick on Linux,
+  # PowerShell and System.Drawing on Windows.
+  system:
+    name: System layer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install ImageMagick
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y imagemagick
+
+      - name: Check the system layer
+        run: node --experimental-strip-types scripts/system-check.ts
