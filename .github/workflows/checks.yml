@@ -1,0 +1,48 @@
+# The checks every other workflow runs: the plugin as the plugin directory reads it, and its tests
+# against the engine, on the Claude Code version asked for.
+name: Checks
+
+on:
+  workflow_call:
+    inputs:
+      claude-code-version:
+        description: The Claude Code version to check against (a version, or latest).
+        type: string
+        default: 2.1.308
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Validate and test (Claude Code ${{ inputs.claude-code-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        run: |
+          npm install --global "@anthropic-ai/claude-code@${{ inputs.claude-code-version }}"
+          claude --version
+
+      - name: The marketplace lists the plugin's own version
+        run: |
+          plugin=$(jq -r .version .claude-plugin/plugin.json)
+          listed=$(jq -r '.plugins[] | select(.name == "inline-images") | .version' .claude-plugin/marketplace.json)
+          if [ "$plugin" != "$listed" ]; then
+            echo "::error file=.claude-plugin/marketplace.json::lists inline-images $listed, but .claude-plugin/plugin.json is $plugin"
+            exit 1
+          fi
+          echo "inline-images $plugin"
+
+      # --profile directory fails on anything the plugin directory refuses a submission for, the icon included.
+      - name: Validate
+        run: claude plugin validate . --profile directory
+
+      - name: Test
+        run: claude plugin test .

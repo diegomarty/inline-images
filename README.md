@@ -76,6 +76,8 @@ claude plugin test .       # runs hooks/register.test.tsx against the engine
 claude --plugin-dir .      # a session with the mod loaded from this folder
 ```
 
+GitHub Actions run the same checks: [CI](.github/workflows/ci.yml) on every push to `main` and every pull request, on the Claude Code version the plugin is built for; [Latest Claude Code](.github/workflows/latest-claude-code.yml) every Monday on the newest one, opening an issue when they fail (the mod API is early access); and [Release](.github/workflows/release.yml) on a `v<version>` tag that matches `plugin.json`, which makes the GitHub release. Dependabot keeps the actions up to date.
+
 The icon, [`.claude-plugin/icon.png`](.claude-plugin/icon.png), is drawn by [`scripts/make-icon.py`](scripts/make-icon.py): `python3 scripts/make-icon.py .claude-plugin/icon.png` (needs Pillow).
 
 MIT © DiegoMarty. [`hooks/pixels.ts`](hooks/pixels.ts) and [`hooks/chip.tsx`](hooks/chip.tsx) come from [midudev/better-claude](https://github.com/midudev/better-claude), MIT © Miguel Ángel Durán (midudev).

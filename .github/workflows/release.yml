@@ -1,0 +1,41 @@
+# A tag v<version> releases that version: the tag, plugin.json and the marketplace agree, the checks
+# pass, and a GitHub release is made with notes from the commits since the last.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: The tag is the plugin's version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          version=$(jq -r .version .claude-plugin/plugin.json)
+          if [ "${GITHUB_REF_NAME}" != "v$version" ]; then
+            echo "::error file=.claude-plugin/plugin.json::the tag is ${GITHUB_REF_NAME}, but the plugin is $version"
+            exit 1
+          fi
+
+  checks:
+    needs: version
+    uses: ./.github/workflows/checks.yml
+
+  release:
+    name: GitHub release
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

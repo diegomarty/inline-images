@@ -1,0 +1,42 @@
+# The mod API is early access: a Claude Code release may change it. Every Monday the checks run on
+# the latest Claude Code; when they fail, an issue says so (one, commented on while it stays open).
+name: Latest Claude Code
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      claude-code-version: latest
+
+  report:
+    name: Report the failure
+    needs: checks
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or comment on the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Checks fail on the latest Claude Code"
+          version=$(npm view @anthropic-ai/claude-code version)
+          body="The checks failed on Claude Code $version: $RUN"
+          open=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
