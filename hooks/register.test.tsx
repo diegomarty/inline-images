@@ -677,3 +677,19 @@ test('a file where the cache folder goes (sips writing into a folder removed) is
   expect(order).toEqual(['rm -f', 'mkdir -p'])
   expect(await row.find({ type: 'Image' })).toBeDefined()
 })
+
+// --- What the second review found, each kept fixed.
+
+test('a pasted picture not found is looked for again once the last look is old', async ($, on) => {
+  const w = world(on, { files: { [FOLDER]: '' } })
+  w.box.text = 'see [Image #2]'
+  await startSession($)
+  await w.clock.advance(4000)
+  expect(await (await strip($)).find({ type: 'Image' })).toBeUndefined()
+  // The engine wrote it late, or a real paste took the id typed before it.
+  w.files[`${FOLDER}/2.png`] = PNG
+  await w.clock.advance(11_000)
+  const band = await strip($)
+  await w.clock.advance(10)
+  expect(await band.find({ type: 'Image' })).toMatchObject({ props: { alt: '[Image #2]' } })
+})

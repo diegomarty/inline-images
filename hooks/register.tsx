@@ -60,6 +60,9 @@ const WAIT_TRIES = 15
 // this often. The strip of the draft's pictures above it takes this many rows a picture at most.
 const POLL_MS = 500
 const DRAFT_ROWS = 5
+// A pasted picture not found (the engine slow to write it, or an [Image #N] typed before the paste
+// that gets that id) is looked for again once this old.
+const PASTE_RETRY_MS = 10000
 // A picture drawn this recently is not dropped from memory to make room: two that do not fit together
 // would otherwise push each other out and be read again, without end.
 const DRAWN_MS = 2000
@@ -90,8 +93,8 @@ const loaded = new Budget<Loaded>(LOADED_BUDGET, key => forget(key), key => isIn
 const drawnAt = new Map<string, number>()
 const isInUse = (key: string) => Date.now() - (drawnAt.get(key) ?? -Infinity) < DRAWN_MS || [...playing.values()].some(play => play.key === key)
 const loading = new Set<string>()
-// The pictures that could not be read, by key: not tried again on every redraw.
-const failed = new Set<string>()
+// The pictures that could not be read, by key, and when: not tried again on every redraw.
+const failed = new Map<string, number>()
 // Which session the mod reads for: a load started in an earlier one keeps nothing it read.
 let epoch = 0
 // Each picture read from a file (or looked for there): the file, its mtime then (-1: not there),
@@ -459,7 +462,8 @@ async function loadFrom ($: Engine, key: string, origin: Origin): Promise<Read> 
  * read from a file): a redraw would try it again and draw again, without end.
  */
 async function load ($: Engine, key: string, from: () => Promise<Origin[]>) {
-  if (loaded.has(key) || loading.has(key) || failed.has(key)) return
+  const isPaste = key.startsWith('paste:')
+  if (loaded.has(key) || loading.has(key) || (failed.has(key) && !isPaste)) return
   loading.add(key)
   const mine = epoch
   let read: Read | undefined
@@ -468,6 +472,8 @@ async function load ($: Engine, key: string, from: () => Promise<Origin[]>) {
   let now = 0
   try {
     now = await $.clock.now()
+    // A pasted picture not found is looked for again once the last look is old.
+    if (isPaste && failed.has(key) && now - failed.get(key)! < PASTE_RETRY_MS) return
     for (const origin of await from()) {
       try {
         read = await loadFrom($, key, origin)
@@ -486,12 +492,13 @@ async function load ($: Engine, key: string, from: () => Promise<Origin[]>) {
   if (mine !== epoch) return
   let picture: Picture
   if (read) {
+    failed.delete(key)
     keep(key, read.value)
     sourceFiles.set(key, read.file)
     if (read.mtime !== undefined) checked.set(key, { file: read.file, mtime: read.mtime, at: now })
     picture = read.picture
   } else {
-    failed.add(key)
+    failed.set(key, now)
     if (missing && !checked.has(key)) checked.set(key, { file: missing, mtime: -1, at: now })
     picture = { error: reason }
   }
