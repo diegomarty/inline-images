@@ -71,11 +71,14 @@ The repository is private for now: adding it needs access to it, and git signed 
 
 ## Limits
 
-- Images Claude reads are drawn from the file it read, at full quality, where it is still there; else from the bytes the model was sent, which are smaller.
-- A GIF is decoded by the mod itself (no ffmpeg): up to 300 frames, each shrunk to 480 pixels, and all of them to 48 MB together; a longer one is shrunk further.
+- Images Claude reads are drawn from the file it read, at full quality, while it is still the file Claude read (as large as it was); once it is gone or has changed, from the bytes Claude was sent, which are smaller, so the row shows what Claude saw. A picture an answer embeds or names is looked at again every few seconds: changed, or written after the answer, it is drawn anew.
+- Pictures up to 32 MB: one over 4 MiB is read in pieces (a PNG drawn by the terminal not at all: its header gives its size).
+- A GIF is decoded by the mod itself (no ffmpeg): up to 300 frames, each shrunk to 480 pixels as it is decoded, and all of them to 48 MB together; a longer one is shrunk further. Only one frame is ever held at full size.
 - Other formats are converted with `sips` on macOS and ImageMagick (`magick` or `convert`) elsewhere. Without them, a PNG still shows in Ghostty and kitty and a GIF everywhere; the rest say they need a converter.
 - It reads pasted images from the folder Claude Code stores them in for the session (`<CLAUDE_CODE_TMPDIR or /tmp>/claude-<uid>/…/images`), and keeps its own copies in `<that temp folder>/inline-images/<session id>`.
-- tmux passes no pictures through: under it, the cells.
+- tmux passes no pictures through: under it, the cells, even in Ghostty and kitty. Over ssh the terminal is on another machine and cannot read this one's files: Ghostty and kitty are sent the picture's bytes instead.
+- Code is left as code: a `![alt](path)` inside a fence or a code span is not drawn.
+- A picture that cannot be read says why once, and is not tried again on every redraw.
 - The chips need the pointer, so Claude Code's fullscreen interface (`"tui": "fullscreen"` in your settings, or `/config`). The card opens over the rows above the chip's block, or below it where the rows above are too few, up to 24 for the picture.
 - To put the chips beside their blocks, the mod draws such an answer itself, block by block, with the markdown renderer the engine draws replies with: an answer with no picture in it is the engine's as ever. Off fullscreen the engine draws it, the embedded pictures under it.
 - Hovering the name inside the answer itself cannot open the card: the mod is not told where each word of an answer lands once it wraps, so the chips stand beside its block.

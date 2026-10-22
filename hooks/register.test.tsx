@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { decodeGif, shrink } from './gif'
+import { countFrames, decodeGif, shrink } from './gif'
 
 // A PNG of one red pixel.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
@@ -22,27 +22,94 @@ function gif (frames: number[], delay = 20) {
   return Uint8Array.from(bytes)
 }
 
-/** Everything beneath the mod: the session, its files, the processes it runs and what the engine draws. */
-function world (on: On, { env = { TERM_PROGRAM: 'ghostty' }, files = {} as Record<string, string>, tracked = [] as string[] } = {}) {
+/** A 24-bit bottom-up BMP of one pixel, `0xRRGGBB`, as sips writes one. */
+function bmp (color: number) {
+  const bytes = new Uint8Array(58)
+  const view = new DataView(bytes.buffer)
+  bytes.set([0x42, 0x4d])
+  view.setUint32(2, bytes.length, true)
+  view.setUint32(10, 54, true)
+  view.setUint32(14, 40, true)
+  view.setInt32(18, 1, true)
+  view.setInt32(22, 1, true)
+  view.setUint16(26, 1, true)
+  view.setUint16(28, 24, true)
+  bytes.set([color & 0xff, (color >> 8) & 0xff, color >> 16], 54)
+  return bytes.toBase64()
+}
+
+const FOUR_MIB = 4 * 1024 * 1024
+const decoded = (base64: string) => Uint8Array.fromBase64(base64)
+
+/** `base64`'s bytes followed by zeros up to `size`: a file that large, as the mod reads it. */
+const padded = (base64: string, size: number) => {
+  const bytes = new Uint8Array(size)
+  bytes.set(decoded(base64))
+  return bytes.toBase64()
+}
+
+/**
+ * Everything beneath the mod: the session, its files (base64, by path, each with its mtime), the
+ * processes it runs (head, dd, base64, sips, git) and what the engine draws. Like the engine's,
+ * `fs.read` rejects a file of 4 MiB or more, and `fs.stat` one that is not there.
+ */
+function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }> } = {}) {
   const clock = mock.clock(on, { now: 0 })
   mock.env(on, env)
+  const session = { id: 's-1' }
+  const mtimes: Record<string, number> = {}
   const runs: { argv: string[]; stdin?: string }[] = []
+  const reads: string[] = []
+  const exists: string[] = []
+  const stats: string[] = []
   const blits: { requestId: string; key: string; source?: unknown; cells?: string }[] = []
+  const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 's-1' }))
+  on('session.id', () => ({ value: session.id }))
   on('session.root', () => ({ value: '/project/app' }))
   on('session.cwd', () => ({ value: '/project/app' }))
   on('process.run', ($, e) => {
-    runs.push({ argv: [...e.argv], stdin: e.init?.stdin })
-    // `sh -c 'base64 --decode > "$0"' <file>`: the bytes written are read back.
-    if (e.argv[0] === 'sh' && e.argv[3]?.endsWith('.source.gif') && e.init?.stdin) files[e.argv[3]] = e.init.stdin
-    const stdout = e.argv[0] === 'id' ? '501\n' : e.argv[0] === 'git' ? tracked.join('\0') : e.argv[0] === 'uname' ? 'Darwin\n' : ''
-    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    const argv = [...e.argv]
+    runs.push({ argv, stdin: e.init?.stdin })
+    if (argv[0] === 'id') return ok('501\n')
+    if (argv[0] === 'uname') return ok('Darwin\n')
+    if (argv[0] === 'git') return ok(tracked.join('\0'))
+    if (argv[0] === 'sips' && argv[1] === '-g') {
+      const size = sizes[argv.at(-1)!] ?? { width: 1, height: 1 }
+      return ok(`${argv.at(-1)}\n  pixelWidth: ${size.width}\n  pixelHeight: ${size.height}\n`)
+    }
+    if (argv[0] === 'sips') {
+      const out = argv[argv.indexOf('--out') + 1]!
+      files[out] = argv[3] === 'bmp' ? bmp(0xff0000) : PNG
+      return ok()
+    }
+    if (argv[0] === 'sh' && argv[2]?.includes('base64 --decode >') && e.init?.stdin) files[argv[3]!] = e.init.stdin
+    if (argv[0] === 'sh' && argv[2]?.startsWith('head -c')) return ok(decoded(files[argv[3]!] ?? '').subarray(0, 32).toBase64())
+    if (argv[0] === 'sh' && argv[2]?.startsWith('dd ')) {
+      const [file, bs, skip] = [argv[3]!, Number(argv[4]), Number(argv[5])]
+      return ok(decoded(files[file]!).subarray(skip * bs, (skip + 1) * bs).toBase64())
+    }
+    return ok()
   })
-  on('fs.exists', ($, e) => ({ value: e.path in files }))
-  on('fs.list', () => ({ value: [] }))
-  on('fs.stat', ($, e) => ({ value: { kind: 'file' as const, size: files[e.path]?.length ?? 0, mtimeMs: 0, isLink: false } }))
-  on('fs.read', ($, e) => ({ value: { base64: files[e.path] ?? PNG } }))
+  on('fs.exists', ($, e) => {
+    exists.push(e.path)
+    return { value: e.path in files }
+  })
+  on('fs.list', ($, e) => ({
+    value: Object.keys(files).filter(path => path.startsWith(`${e.path}/`) && !path.slice(e.path.length + 1).includes('/'))
+      .map(path => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false }))
+  }))
+  on('fs.stat', ($, e) => {
+    stats.push(e.path)
+    if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { kind: 'file' as const, size: decoded(files[e.path]!).length, mtimeMs: mtimes[e.path] ?? 0, isLink: false } }
+  })
+  on('fs.read', ($, e) => {
+    reads.push(e.path)
+    if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
+    if (decoded(files[e.path]!).length >= FOUR_MIB) throw new Error('over 4 MiB')
+    return { value: { base64: files[e.path]! } }
+  })
   on('ui.blit', ($, e) => {
     blits.push(e as never)
     return { value: {} }
@@ -51,7 +118,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' }, files = {} as Recor
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
-  return { clock, runs, blits }
+  return { clock, runs, reads, exists, stats, blits, files, mtimes, tracked, session }
 }
 
 const startSession = ($: Engine) => $.session.start({ cwd: '/project/app', surface: 'terminal', isInteractive: true })
@@ -66,7 +133,7 @@ const readResult = ($: Engine, output: unknown, onScreen: { first: number; last:
     viewport: SCREEN
   })
 
-const image = (base64: string, type = 'image/png') => ({ type: 'image', file: { base64, type, originalSize: 100 } })
+const image = (base64: string, type = 'image/png', originalSize = decoded(base64).length) => ({ type: 'image', file: { base64, type, originalSize } })
 
 test('decodes every frame of a GIF, with its delay', () => {
   const { width, height, frames } = decodeGif(gif([0, 1], 30))
@@ -99,7 +166,7 @@ test('a picture whose file is gone shows from the bytes Claude read', async ($, 
   await startSession($)
   const row = await readResult($, image(PNG))
   expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { format: 'png' } } })
-  const written = w.runs.find(run => run.argv[0] === 'sh')
+  const written = w.runs.find(run => run.argv[2]?.includes('base64 --decode >'))
   expect(written?.stdin).toBe(PNG)
 })
 
@@ -210,4 +277,162 @@ test('a picture the answer embeds gets no chip of its own', async ($, on) => {
   const row = await answer($, 'Here: ![chart](out/chart.png), saved as out/chart.png')
   expect(await row.find({ type: 'Image' })).toBeDefined()
   expect(await row.find({ key: 'ref:0' })).toBeUndefined()
+})
+
+// --- What the review found, each kept fixed.
+
+const readRow = ($: Engine, id: string, path: string) =>
+  $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'ToolUse', requestId: id, props: { tool_use_id: id, tool: 'Read', input: { file_path: path }, isRunning: false, isErrored: false, isInterrupted: false }, viewport: SCREEN })
+
+const resultRow = ($: Engine, id: string, output: unknown) =>
+  $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'ToolResult', requestId: id, props: { tool_use_id: id, tool: 'Read', output, isErrored: false, onScreen: { first: 0, last: 1, of: 2 } }, viewport: SCREEN })
+
+test('a picture over 4 MiB is drawn: a PNG from its header alone, a GIF read in pieces', async ($, on) => {
+  const big = padded(PNG, 5 * 1024 * 1024)
+  const bigGif = padded(gif([0, 1]).toBase64(), 5 * 1024 * 1024)
+  const w = world(on, { files: { '/project/app/big.png': big, '/project/app/big.gif': bigGif } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/big.png')
+  const png = await resultRow($, 'tu-1', image(PNG, 'image/png', decoded(big).length))
+  expect(await png.find({ type: 'Image' })).toMatchObject({ props: { source: { file: '/project/app/big.png', format: 'png' } } })
+  expect(w.reads).not.toContain('/project/app/big.png')
+  await readRow($, 'tu-2', '/project/app/big.gif')
+  const anim = await resultRow($, 'tu-2', image(gif([0, 1]).toBase64(), 'image/gif', decoded(bigGif).length))
+  expect(await anim.find({ type: 'Image' })).toMatchObject({ props: { source: { format: 'rgba', width: 2, height: 1 } } })
+  // Three pieces of 2 MiB, each through dd.
+  expect(w.runs.filter(run => run.argv[2]?.startsWith('dd ') && run.argv[3] === '/project/app/big.gif')).toHaveLength(3)
+})
+
+test('a picture that cannot be read is not tried again on every redraw, but is once its file is there', async ($, on) => {
+  const w = world(on)
+  await startSession($)
+  const text = 'Here: ![chart](out/chart.png)'
+  await answer($, text, 'a-1')
+  await answer($, text, 'a-2')
+  await answer($, text, 'a-3')
+  expect(w.stats.filter(path => path === '/project/app/out/chart.png')).toHaveLength(1)
+  // The file written later: looked at again once the last look is old, and drawn.
+  w.files['/project/app/out/chart.png'] = PNG
+  await w.clock.advance(4000)
+  // Its drawing looks again and reads the picture; a drawing waiting on it draws again with it.
+  const row = await answer($, text, 'a-4')
+  await w.clock.advance(10)
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { file: '/project/app/out/chart.png' } } })
+})
+
+test('a GIF is shrunk as it is decoded, its frames counted first', () => {
+  expect(countFrames(gif([0, 1, 0]))).toBe(3)
+  const told: number[][] = []
+  const { frames } = decodeGif(gif([0, 1]), 500, (width, height, count) => {
+    told.push([width, height, count])
+    return 1
+  })
+  expect(told).toEqual([[2, 1, 2]])
+  expect(frames.map(frame => [frame.width, frame.height])).toEqual([[1, 1], [1, 1]])
+  expect([...frames[1]!.data]).toEqual([0, 0, 255, 255])
+})
+
+test("after /clear, a pasted [Image #1] is the new session's", async ($, on) => {
+  const folder = '/tmp/claude-501/-project-app'
+  const w = world(on, { files: { [`${folder}/s-2/images`]: '', [`${folder}/s-2/images/1.png`]: PNG } })
+  await startSession($)
+  const sent = (requestId: string) => $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'UserMessage', requestId, props: { text: 'look [Image #1]', origin: { kind: 'composer' }, isExpanded: false }, viewport: SCREEN })
+  await sent('m-1')
+  await w.clock.advance(4000)
+  w.session.id = 's-2'
+  await sent('m-2')
+  await w.clock.advance(10)
+  const row = await sent('m-3')
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { file: `${folder}/s-2/images/1.png` }, alt: '[Image #1]' } })
+})
+
+test('a picture shown as code is left as code: in a fence and in a code span', async ($, on) => {
+  world(on, { files: { '/project/app/docs/logo.png': PNG, '/project/app/shot.png': PNG } })
+  await startSession($)
+  const fence = '```md\n![logo](docs/logo.png)\n```'
+  // Nothing but code: the engine draws the answer as it is.
+  const plain = await answer($, `The README starts:\n\n${fence}`, 'a-1')
+  expect(await plain.find({ key: 'engine' })).toBeDefined()
+  expect(await plain.find({ type: 'Image' })).toBeUndefined()
+  // An answer the mod draws (it names shot.png): its code is drawn whole, no picture taken out of it.
+  const drawn = await answer($, `The README starts:\n\n${fence}\n\nand \`![logo](docs/logo.png)\` stays, see shot.png.`, 'a-2')
+  expect(await drawn.find({ type: 'Image' })).toBeUndefined()
+  expect((await drawn.findAll({ type: 'Markdown' })).map(block => block.props.text)).toEqual(['The README starts:', fence, 'and `![logo](docs/logo.png)` stays, see shot.png.'])
+})
+
+test('a Read row shows the bytes Claude read once its file has changed', async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': padded(PNG, 200) } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  // Claude read the 1-pixel PNG; the file is another now.
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { file: expect.stringMatching(/\.source\.png$/) } } })
+  expect(w.runs.find(run => run.argv[2]?.includes('base64 --decode >'))?.stdin).toBe(PNG)
+})
+
+test('a picture Claude writes after answering gets its chip, once the index is old', async ($, on) => {
+  const w = world(on, { tracked: ['src/index.ts'] })
+  await startSession($)
+  const text = 'Saved it as `demo.gif`.'
+  expect(await (await answer($, text, 'a-1')).find({ key: 'ref:0' })).toBeUndefined()
+  w.tracked.push('docs/media/demo.gif')
+  w.files['/project/app/docs/media/demo.gif'] = gif([0, 1]).toBase64()
+  await w.clock.advance(4000)
+  expect(await (await answer($, text, 'a-2')).find({ key: 'ref:0' })).toMatchObject({ props: { props: { label: 'demo.gif' } } })
+})
+
+test('over ssh the terminal is sent the picture; under tmux it is drawn in cells', async ($, on) => {
+  world(on, { env: { TERM: 'xterm-kitty', SSH_CONNECTION: '10.0.0.2 51234 10.0.0.1 22' } })
+  await startSession($)
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { png: PNG } } })
+})
+
+test('under tmux a picture is drawn in cells, even from Ghostty', async ($, on) => {
+  world(on, { env: { TERM_PROGRAM: 'ghostty', TMUX: '/tmp/tmux-501/default,1,0' } })
+  await startSession($)
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Raster' })).toBeDefined()
+  expect(await row.find({ type: 'Image' })).toBeUndefined()
+})
+
+test('a small picture is not enlarged to convert it, and takes the cells of its own size', async ($, on) => {
+  const w = world(on, { files: { '/project/app/icon.jpg': Uint8Array.of(0xff, 0xd8, 0xff, 0xe0).toBase64() }, sizes: { '/project/app/icon.jpg': { width: 64, height: 64 } } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/icon.jpg')
+  const row = await resultRow($, 'tu-1', image(Uint8Array.of(0xff, 0xd8, 0xff, 0xe0).toBase64(), 'image/jpeg'))
+  const converted = w.runs.find(run => run.argv[0] === 'sips' && run.argv[1] === '-s')
+  expect(converted?.argv).not.toContain('-Z')
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { columns: 8, rows: 4 } })
+})
+
+test('a card over an answer with rows under it stays on its rows, not above the screen', async ($, on) => {
+  world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const row = await answer($, 'See shot.png.', 'a-1', { first: 0, last: 0, of: 1 })
+  await row.post({ rows: 1 }, { in: 'probe:0' })
+  // A later row under it: the answer is not at the foot of the screen.
+  await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'UserMessage', requestId: 'm-2', props: { text: 'and then?', origin: { kind: 'composer' }, isExpanded: false }, viewport: SCREEN })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  expect(await row.find({ key: 'card' })).toBeUndefined()
+})
+
+test('the newest answer, at the foot of the screen, opens its card over the rows above it', async ($, on) => {
+  world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const row = await answer($, 'See shot.png.', 'a-1', { first: 0, last: 0, of: 1 })
+  await row.post({ rows: 1 }, { in: 'probe:0' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  expect(await row.find({ key: 'card' })).toMatchObject({ props: { top: -4 } })
+})
+
+test('a card waits for every block above its chip to be measured', async ($, on) => {
+  world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const row = await answer($, 'First.\n\nSecond.\n\nI saved it as shot.png.', 'a-1', { first: 0, last: 9, of: 10 })
+  await row.post({ rows: 1 }, { in: 'probe:2' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  expect(await row.find({ key: 'card' })).toBeUndefined()
+  for (const [i, rows] of [2, 2].entries()) await row.post({ rows }, { in: `probe:${i}` })
+  expect(await row.find({ key: 'card' })).toMatchObject({ props: { top: 2 } })
 })

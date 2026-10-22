@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, EventOf, ImageSource, Register, RenderElement, Timer } from 'claude-code'
 
-import { decodeGif, isGif, shrink } from './gif'
+import { decodeGif, isGif } from './gif'
 import { parseBmp, toCells } from './pixels'
 import type { Pixels } from './pixels'
 import type { Hovered, Picture } from '../types'
@@ -18,6 +18,12 @@ const TOKEN = /\[Image #(\d+)\]/g
 const MARKDOWN_IMAGE = /!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g
 const IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic)$/i
 const MAX_FILE_BYTES = 32 * 1024 * 1024
+// $.fs.read and a process's output each stop at 4 MiB: a larger file is read in pieces this large.
+const READ_LIMIT = 4 * 1024 * 1024
+const PIECE_BYTES = 2 * 1024 * 1024
+// How long a picture read from a file, the image index and a lookup that missed are trusted before
+// they are looked at again.
+const RECHECK_MS = 3000
 const MAX_COLUMNS = 120
 // Under a tool row the transcript writes `  ⎿  `: the picture lines up with the text after it.
 const RESULT_INDENT = 5
@@ -61,10 +67,18 @@ let folder: string | undefined
 let cache: string | undefined
 const loaded = new Map<string, Loaded>()
 const loading = new Set<string>()
+// The pictures that could not be read, by key: not tried again on every redraw.
+const failed = new Set<string>()
+// Each picture read from a file (or looked for there): the file, its mtime then (-1: not there),
+// and when that was last looked at.
+const checked = new Map<string, { file: string; mtime: number; at: number }>()
 const cells = new Map<string, string>()
-// The pictures each answer names, by its text; the image files under the working folder.
-const references = new Map<string, Promise<string[]>>()
-let index: Promise<string[]> | undefined
+// The pictures each block of an answer names, by its text, and whether every name was found; the
+// image files under the working folder; each with when it was looked up.
+const references = new Map<string, { at: number; found: Promise<{ files: string[]; isComplete: boolean }> }>()
+let index: { at: number; files: Promise<string[]> } | undefined
+// The order transcript rows were first drawn in: the newest is the one at the foot of the screen.
+const rowOrder = new Map<string, number>()
 // The file each chip names, by `<requestId>/<chip key>`; and where the answer showing the card was when it opened.
 const chipFiles = new Map<string, string>()
 let hoveredAt: string | undefined
@@ -133,7 +147,11 @@ async function cacheFolder ($: Engine) {
   return (cache = path)
 }
 
-/** Forgets what was read in another session: after /clear the pasted ids start again from 1. */
+/**
+ * Forgets what was read in another session: after /clear the pasted ids start again from 1. It runs
+ * while rows draw, which may not write state: the state keeps the old session's pictures, under keys
+ * of their own (a pasted image's key names its session), and a card open over a row no longer drawn.
+ */
 async function follow ($: Engine) {
   const id = await $.session.id()
   if (id === sessionId) return
@@ -141,15 +159,24 @@ async function follow ($: Engine) {
   folder = undefined
   cache = undefined
   loaded.clear()
+  failed.clear()
+  checked.clear()
   cells.clear()
   for (const play of playing.values()) play.timer?.cancel()
   playing.clear()
   references.clear()
   blockRows.clear()
+  rowOrder.clear()
   index = undefined
-  await update($, pictures, () => ({}))
-  await update($, hovered, () => null)
 }
+
+/** Notes a transcript row the first time it is drawn. */
+function noteRow (requestId: string) {
+  if (!rowOrder.has(requestId)) rowOrder.set(requestId, rowOrder.size)
+}
+
+/** Whether a row is the newest drawn: the transcript's last, at the foot of the screen. */
+const isNewest = (requestId: string) => rowOrder.get(requestId) === rowOrder.size - 1
 
 /** Writes base64 bytes to a file: `$.fs` writes text alone. */
 async function writeBytes ($: Engine, path: string, base64: string) {
@@ -167,17 +194,36 @@ async function writeFrames ($: Engine, dir: string, lines: string[]) {
 // The converter that worked here: sips on macOS, ImageMagick elsewhere.
 let tool: 'sips' | 'magick' | 'convert' | undefined
 
-/** Writes `file` as `format` to `out`, its longest side shrunk to `side` pixels at most. */
+/** A picture's own width and height, as `name` reads them; undefined where it cannot. */
+async function sizeWith ($: Engine, name: 'sips' | 'magick' | 'convert', file: string) {
+  const argv = name === 'sips'
+    ? ['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', file]
+    : [name === 'magick' ? 'magick' : 'identify', ...(name === 'magick' ? ['identify'] : []), '-format', '%w %h', `${file}[0]`]
+  const result = await $.process.run(argv).catch(() => undefined)
+  if (result?.exitCode !== 0) return undefined
+  const [width, height] = name === 'sips'
+    ? [/pixelWidth: (\d+)/.exec(result.stdout)?.[1], /pixelHeight: (\d+)/.exec(result.stdout)?.[1]].map(Number)
+    : result.stdout.trim().split(/\s+/).map(Number)
+  return width && height ? { width, height } : undefined
+}
+
+/**
+ * Writes `file` as `format` to `out`, its longest side shrunk to `side` pixels at most, never
+ * enlarged (sips's -Z would enlarge a smaller one). Answers the picture's own size.
+ */
 async function convert ($: Engine, file: string, out: string, format: 'png' | 'bmp', side: number) {
   const tools = tool ? [tool] : (['sips', 'magick', 'convert'] as const)
   for (const name of tools) {
+    const size = await sizeWith($, name, file)
+    if (!size) continue
+    const shrinks = Math.max(size.width, size.height) > side
     const argv = name === 'sips'
-      ? ['sips', '-s', 'format', format, '-Z', String(side), file, '--out', out]
+      ? ['sips', '-s', 'format', format, ...(shrinks ? ['-Z', String(side)] : []), file, '--out', out]
       : [name, `${file}[0]`, '-resize', `${side}x${side}>`, `${format === 'bmp' ? 'BMP3' : 'PNG'}:${out}`]
     const result = await $.process.run(argv).catch(() => undefined)
     if (result?.exitCode === 0) {
       tool = name
-      return
+      return size
     }
   }
   throw new Error('needs sips (macOS) or ImageMagick to read it')
@@ -190,15 +236,36 @@ function pngSize (bytes: Uint8Array) {
   return { width: view.getUint32(16), height: view.getUint32(20) }
 }
 
-const bytesOf = async ($: Engine, file: string) => Uint8Array.fromBase64((await $.fs.read(file, { as: 'bytes' })).base64)
+/** A file's first bytes: enough to tell a GIF, and a PNG's size. */
+async function headOf ($: Engine, file: string) {
+  const result = await $.process.run(['sh', '-c', 'head -c 32 "$0" | base64', file])
+  if (result.exitCode !== 0) throw new Error(`could not read ${baseName(file)}`)
+  return Uint8Array.fromBase64(result.stdout.replace(/\s+/g, ''))
+}
 
-/** A GIF's frames, shrunk to fit the budget, as the terminal is shown them. */
-async function loadGif ($: Engine, key: string, bytes: Uint8Array): Promise<Picture> {
-  const gif = decodeGif(bytes, MAX_FRAMES)
-  const count = gif.frames.length
+/** A whole file's bytes: in one read under 4 MiB, past that in pieces, each through base64. */
+async function bytesOf ($: Engine, file: string, size?: number) {
+  size ??= (await $.fs.stat(file)).size
+  if (size < READ_LIMIT) return Uint8Array.fromBase64((await $.fs.read(file, { as: 'bytes' })).base64)
+  const bytes = new Uint8Array(size)
+  for (let at = 0; at < size; at += PIECE_BYTES) {
+    const result = await $.process.run(['sh', '-c', 'dd if="$0" bs="$1" skip="$2" count=1 2>/dev/null | base64', file, String(PIECE_BYTES), String(at / PIECE_BYTES)])
+    if (result.exitCode !== 0 || result.isStdoutTruncated) throw new Error(`could not read ${baseName(file)}`)
+    bytes.set(Uint8Array.fromBase64(result.stdout.replace(/\s+/g, '')).subarray(0, size - at), at)
+  }
+  return bytes
+}
+
+/** A whole number that changes when the file does: what tells the terminal to read it again. */
+const generationOf = (mtime: number) => Math.floor(mtime / 1000) % 2147483647
+
+/** A GIF's frames, shrunk to fit the budget as they are decoded, as the terminal is shown them. */
+async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: string): Promise<Picture> {
   // Every frame together within the budget: a long animation is shrunk further.
-  const side = Math.min(FRAME_PIXELS, Math.floor(Math.sqrt(FRAME_BUDGET / 4 / count) * Math.max(gif.width, gif.height) / Math.sqrt(gif.width * gif.height)))
-  const frames = gif.frames.map(frame => shrink(frame, side, side))
+  const gif = decodeGif(bytes, MAX_FRAMES, (w, h, count) =>
+    Math.max(1, Math.min(FRAME_PIXELS, Math.floor(Math.sqrt(FRAME_BUDGET / 4 / Math.max(1, count)) * Math.max(w, h) / Math.sqrt(w * h)))))
+  const frames = gif.frames
+  const count = frames.length
   const { width, height } = frames[0]!
   const delays = gif.frames.map(frame => frame.delay)
   if (graphics === 'none') {
@@ -206,7 +273,7 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array): Promise<Pict
   } else if (graphics === 'bytes') {
     loaded.set(key, { sources: frames.map(frame => ({ rgba: frame.data.toBase64(), width, height })), delays })
   } else {
-    const dir = `${await cacheFolder($)}/${nameOf(key)}`
+    const dir = `${await cacheFolder($)}/${nameOf(key + version)}`
     await $.process.run(['mkdir', '-p', dir])
     await writeFrames($, dir, frames.map(frame => frame.data.toBase64()))
     loaded.set(key, { sources: frames.map((_, i) => ({ file: `${dir}/${i}.rgba`, format: 'rgba' as const, width, height })), delays })
@@ -214,61 +281,128 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array): Promise<Pict
   return { width: gif.width, height: gif.height, frames: count }
 }
 
-/** A still picture, as a PNG the terminal reads or is sent, or as pixels to draw in cells. */
-async function loadStill ($: Engine, key: string, file: string, bytes: Uint8Array): Promise<Picture> {
-  const out = `${await cacheFolder($)}/${nameOf(key)}`
+/**
+ * A still picture, as a PNG the terminal reads or is sent, or as pixels to draw in cells. Its size
+ * is its own (a PNG's header, else the converter's), not the size it was shrunk to: it decides how
+ * many cells it takes.
+ */
+async function loadStill ($: Engine, key: string, file: string, head: Uint8Array, bytes: number, mtime: number, version: string): Promise<Picture> {
+  const out = `${await cacheFolder($)}/${nameOf(key + version)}`
   if (graphics === 'none') {
-    await convert($, file, `${out}.bmp`, 'bmp', CELL_SOURCE_PIXELS)
+    const own = await convert($, file, `${out}.bmp`, 'bmp', CELL_SOURCE_PIXELS)
     const pixels = parseBmp(await bytesOf($, `${out}.bmp`))
     loaded.set(key, { pixels: [pixels], delays: [0] })
-    // The size the picture has, not the size it was shrunk to: it decides how many cells it takes.
-    const size = pngSize(bytes)
-    return { width: size?.width ?? pixels.width, height: size?.height ?? pixels.height, frames: 1 }
+    const size = pngSize(head) ?? own
+    return { width: size.width, height: size.height, frames: 1 }
   }
   let png = file
-  let pngBytes = bytes
-  const size = pngSize(bytes)
+  let own = pngSize(head)
   const side = graphics === 'bytes' ? VIEW_PIXELS : STILL_PIXELS
-  if (!size || Math.max(size.width, size.height) > side || (graphics === 'bytes' && bytes.length > VIEW_BYTES)) {
+  if (!own || Math.max(own.width, own.height) > side || (graphics === 'bytes' && bytes > VIEW_BYTES)) {
     png = `${out}.png`
-    await convert($, file, png, 'png', side)
-    pngBytes = await bytesOf($, png)
+    own = (await convert($, file, png, 'png', side)) ?? own
   }
-  const shown = pngSize(pngBytes)
+  const shown = pngSize(await headOf($, png))
   if (!shown) throw new Error('could not read it')
-  if (graphics === 'bytes' && pngBytes.length > VIEW_BYTES) throw new Error('too large to send')
-  loaded.set(key, { sources: [graphics === 'file' ? { file: png, format: 'png' } : { png: pngBytes.toBase64() }], delays: [0] })
-  return { width: size?.width ?? shown.width, height: size?.height ?? shown.height, frames: 1 }
+  if (graphics === 'file') {
+    loaded.set(key, { sources: [{ file: png, format: 'png', generation: generationOf(mtime) }], delays: [0] })
+  } else {
+    const pngBytes = await bytesOf($, png)
+    if (pngBytes.length > VIEW_BYTES) throw new Error('too large to send')
+    loaded.set(key, { sources: [{ png: pngBytes.toBase64() }], delays: [0] })
+  }
+  const size = own ?? shown
+  return { width: size.width, height: size.height, frames: 1 }
+}
+
+/** Where a picture is read from: a file, or bytes the transcript holds (`ext` naming their kind). */
+type Origin = { file: string } | { base64: string; ext: string }
+
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
+
+/** Reads a picture from one origin. */
+async function loadFrom ($: Engine, key: string, origin: Origin, now: number): Promise<Picture> {
+  let file: string
+  let size: number
+  let mtime = 0
+  if ('file' in origin) {
+    file = origin.file
+    const stat = await $.fs.stat(file).catch(() => {
+      throw new Error('not found')
+    })
+    if (stat.size > MAX_FILE_BYTES) throw new Error('larger than 32 MB')
+    size = stat.size
+    mtime = stat.mtimeMs
+    checked.set(key, { file, mtime, at: now })
+  } else {
+    file = `${await cacheFolder($)}/${nameOf(key)}.source.${origin.ext}`
+    await writeBytes($, file, origin.base64)
+    size = Math.floor((origin.base64.length * 3) / 4)
+  }
+  const version = `@${mtime}`
+  const head = await headOf($, file)
+  return isGif(head) ? loadGif($, key, await bytesOf($, file, size), version) : loadStill($, key, file, head, size, mtime, version)
 }
 
 /**
- * Reads a picture once, from a file or from bytes the transcript holds (`ext` naming their kind);
- * the drawings that wait on it draw again.
+ * Reads a picture once, from the first of its origins that reads; the drawings that wait on it
+ * draw again. One that cannot be read is not tried again (until its file changes, for a picture
+ * read from a file): a redraw would try it again and draw again, without end.
  */
-async function load ($: Engine, key: string, from: () => Promise<{ file: string } | { base64: string; ext: string } | undefined>) {
-  if (loaded.has(key) || loading.has(key)) return
+async function load ($: Engine, key: string, from: () => Promise<Origin[]>) {
+  if (loaded.has(key) || loading.has(key) || failed.has(key)) return
   loading.add(key)
-  let picture: Picture
+  let picture: Picture | undefined
+  let reason = 'not found'
   try {
-    const origin = await from()
-    if (!origin) throw new Error('not found')
-    let file: string
-    if ('file' in origin) {
-      file = origin.file
-      if ((await $.fs.stat(file)).size > MAX_FILE_BYTES) throw new Error('larger than 32 MB')
-    } else {
-      file = `${await cacheFolder($)}/${nameOf(key)}.source.${origin.ext}`
-      await writeBytes($, file, origin.base64)
+    const now = await $.clock.now()
+    for (const origin of await from()) {
+      try {
+        picture = await loadFrom($, key, origin, now)
+        break
+      } catch (error) {
+        reason = messageOf(error)
+        if ('file' in origin && !checked.has(key)) checked.set(key, { file: origin.file, mtime: -1, at: now })
+      }
     }
-    const bytes = await bytesOf($, file)
-    picture = isGif(bytes) ? await loadGif($, key, bytes) : await loadStill($, key, file, bytes)
   } catch (error) {
-    picture = { error: error instanceof Error ? error.message : String(error) }
+    reason = messageOf(error)
   } finally {
     loading.delete(key)
   }
+  if (!picture) {
+    failed.add(key)
+    picture = { error: reason }
+  }
   // Read in the background: a module unloaded meanwhile has no state to write to.
   await update($, pictures, all => ({ ...all, [key]: picture })).catch(() => undefined)
+}
+
+/**
+ * Looks again, now and then, at the file a picture was read from (or looked for at): changed, or
+ * there at last, the picture is read again; the rows that show it draw again.
+ */
+async function recheck ($: Engine, key: string) {
+  const seen = checked.get(key)
+  if (!seen || loading.has(key)) return
+  const now = await $.clock.now()
+  if (now - seen.at < RECHECK_MS) return
+  seen.at = now
+  const mtime = await $.fs.stat(seen.file).then(stat => stat.mtimeMs, () => -1)
+  if (mtime === seen.mtime) return
+  checked.delete(key)
+  loaded.delete(key)
+  failed.delete(key)
+  for (const id of [...cells.keys()]) if (id.startsWith(`${key}#`)) cells.delete(id)
+  for (const [id, play] of playing) {
+    if (play.key !== key) continue
+    play.timer?.cancel()
+    playing.delete(id)
+  }
+  await update($, pictures, all => {
+    const { [key]: _, ...rest } = all
+    return rest
+  }).catch(() => undefined)
 }
 
 /**
@@ -352,6 +486,7 @@ function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: st
   const { ui: { Image, Raster, Text }, requestId } = site
   const picture = all[key]
   const frames = loaded.get(key)
+  if (key.startsWith('file:')) void recheck($, key).catch(() => undefined)
   if (picture && 'error' in picture) return <Text key={key} dimColor>{`${label}: no preview, ${picture.error}`}</Text>
   if (!picture || !frames) return <Text key={key} dimColor>{`${label} loading…`}</Text>
 
@@ -418,7 +553,7 @@ function withPictures (ui: Ui, drawn: RenderElement, indent: number, pictures: R
   )
 }
 
-type ReadImage = { type: 'image'; file: { base64: string; type: string } }
+type ReadImage = { type: 'image'; file: { base64: string; type: string; originalSize?: number } }
 
 const isReadImage = (output: unknown): output is ReadImage =>
   typeof output === 'object' && output !== null && (output as { type?: unknown }).type === 'image' &&
@@ -429,27 +564,51 @@ const filePathOf = (input: unknown) => {
   return typeof path === 'string' ? path : undefined
 }
 
-/** Reads the picture a Read call returned: the file it read where it is still there, else the bytes it returned. */
+/**
+ * Reads the picture a Read call returned: from the file it read, at full size, while the file is
+ * still the one Claude read (as large as it was); else, or where the file cannot be read, from the
+ * bytes Claude was sent.
+ */
 function loadRead ($: Engine, toolUseId: string, output: ReadImage) {
   const key = `read:${toolUseId}`
   void load($, key, async () => {
+    const sent: Origin = { base64: output.file.base64, ext: output.file.type.replace('image/', '').replace('jpeg', 'jpg') }
     const path = readPaths.get(toolUseId)
-    if (path && (await $.fs.exists(path))) return { file: path }
-    return { base64: output.file.base64, ext: output.file.type.replace('image/', '').replace('jpeg', 'jpg') }
+    const size = path ? await $.fs.stat(path).then(stat => stat.size, () => undefined) : undefined
+    return path && size !== undefined && size === output.file.originalSize ? [{ file: path }, sent] : [sent]
   })
   return key
 }
 
-/** The image files under the working folder, as git knows them (tracked or not, less the ignored), once a session. */
-function imageIndex ($: Engine, cwd: string) {
-  index ??= $.process.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.PNG', '*.JPG', '*.JPEG', '*.GIF', '*.WEBP'], { cwd })
-    .then(result => (result.exitCode === 0 ? result.stdout.split('\0').filter(Boolean).map(path => `${cwd}/${path}`) : []))
-    .catch(() => [])
-  return index
+/** The image files under the working folder, as git knows them (tracked or not, less the ignored), listed again once old. */
+function imageIndex ($: Engine, cwd: string, now: number) {
+  if (!index || now - index.at >= RECHECK_MS) {
+    const files = $.process.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.PNG', '*.JPG', '*.JPEG', '*.GIF', '*.WEBP'], { cwd })
+      .then(result => (result.exitCode === 0 ? result.stdout.split('\0').filter(Boolean).map(path => `${cwd}/${path}`) : []))
+      .catch(() => [])
+    index = { at: now, files }
+  }
+  return index.files
 }
 
+/**
+ * The text with its code blanked out, every other character where it was: a fenced block (to its
+ * closing fence, or the end) and an inline code span hold code, not markdown.
+ */
+function withoutCode (text: string) {
+  const blank = (code: string) => code.replace(/[^\n]/g, ' ')
+  return text
+    .replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1[^\n]*$|(?![\s\S]))/gm, blank)
+    .replace(/(`+)[^`\n][\s\S]*?\1/g, blank)
+}
+
+/** The pictures an answer embeds (`![alt](path)`, outside code), each with where it is in the text. */
+const embeddedAt = (text: string) => [...withoutCode(text).matchAll(MARKDOWN_IMAGE)]
+  .map(match => ({ target: match[2]!, at: match.index }))
+  .filter(({ target }) => !/^[a-z]+:\/\//i.test(target.replace(/^file:\/\//, '')) && IMAGE_FILE.test(target))
+
 /** The text an answer draws its pictures from: what it embeds (`![alt](path)`), apart from what it only names. */
-const embeddedIn = (text: string) => [...text.matchAll(MARKDOWN_IMAGE)].map(match => match[2]!).filter(target => !/^[a-z]+:\/\//i.test(target.replace(/^file:\/\//, '')) && IMAGE_FILE.test(target))
+const embeddedIn = (text: string) => embeddedAt(text).map(({ target }) => target)
 
 /** A path as an answer wrote it, made absolute: from home, or from the working folder. */
 function absolute (target: string, cwd: string, home: string | undefined) {
@@ -466,10 +625,10 @@ function absolute (target: string, cwd: string, home: string | undefined) {
  * The image files an answer names without embedding them, each once, in order: a path that is there,
  * else the file under the working folder whose path ends with the name (`leads-filtros.gif`).
  */
-async function referencesIn ($: Engine, text: string, cwd: string) {
+async function referencesIn ($: Engine, text: string, cwd: string, now: number) {
   const bare = text.replace(MARKDOWN_IMAGE, ' ').replace(WEB_LINK, match => (match.startsWith('file://') ? match : ' '))
   const named = [...new Set([...bare.matchAll(REFERENCE)].map(match => (match[1] ?? match[2] ?? match[3])!.trim()))].slice(0, MAX_REFERENCES)
-  if (named.length === 0) return []
+  if (named.length === 0) return { files: [], isComplete: true }
   const home = named.some(name => name.startsWith('~/')) ? await $.env.get('HOME') : undefined
   const found: string[] = []
   for (const name of named) {
@@ -479,10 +638,23 @@ async function referencesIn ($: Engine, text: string, cwd: string) {
       continue
     }
     const tail = `/${name.replace(/^(\.\/|~\/|\/)+/, '')}`
-    const match = (await imageIndex($, cwd)).filter(file => file.endsWith(tail)).sort((a, b) => a.length - b.length)[0]
+    const match = (await imageIndex($, cwd, now)).filter(file => file.endsWith(tail)).sort((a, b) => a.length - b.length)[0]
     if (match) found.push(match)
   }
-  return [...new Set(found)]
+  return { files: [...new Set(found)], isComplete: found.length === named.length }
+}
+
+/**
+ * The pictures a block of an answer names: looked up once, and again (once old) while a name is
+ * still not found, as one Claude writes after it answers.
+ */
+async function namedIn ($: Engine, text: string, cwd: string) {
+  const now = await $.clock.now()
+  const known = references.get(text)
+  if (known && (now - known.at < RECHECK_MS || (await known.found).isComplete)) return (await known.found).files
+  const found = referencesIn($, text, cwd, now)
+  references.set(text, { at: now, found })
+  return (await found).files
 }
 
 /** Opens a picture in the system's viewer. */
@@ -536,15 +708,22 @@ export const register: Register = (on, options) => {
     const term = await $.env.get('TERM')
     const isNative = program === 'ghostty' || term === 'xterm-ghostty' || term === 'xterm-kitty' || (await $.env.get('KITTY_WINDOW_ID')) !== undefined
     const isForced = /^(1|true|yes|on)$/i.test((await $.env.get('CLAUDE_CODE_FORCE_TERMINAL_IMAGES')) ?? '')
-    graphics = isNative ? 'file' : isForced ? 'bytes' : 'none'
+    // Over ssh the terminal is on another machine: it cannot read this one's files, it is sent the
+    // bytes. tmux passes no picture through: cells.
+    const isRemote = (await $.env.get('SSH_CONNECTION')) !== undefined || (await $.env.get('SSH_TTY')) !== undefined
+    const isTmux = (await $.env.get('TMUX')) !== undefined
+    graphics = isForced ? 'bytes' : isTmux ? 'none' : isNative ? (isRemote ? 'bytes' : 'file') : 'none'
     // A reload starts with nothing read: what the state says was read is read again.
     sessionId = undefined
     await follow($)
+    await update($, pictures, () => ({}))
+    await update($, hovered, () => null)
     return result
   })
 
   // The row of a Read call names the file it read: its picture is read from there, at full size.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    noteRow(e.requestId)
     if (e.props.tool === 'Read') {
       const path = filePathOf(e.props.input)
       if (path) readPaths.set(e.props.tool_use_id, path)
@@ -554,6 +733,7 @@ export const register: Register = (on, options) => {
 
   // A Read of a picture: the picture under its `⎿ Read image` line.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    noteRow(e.requestId)
     if (e.surface !== 'terminal' || e.props.tool !== 'Read' || e.props.isErrored || !isReadImage(e.props.output)) return next(e)
     await follow($)
     const key = loadRead($, e.props.tool_use_id, e.props.output)
@@ -564,6 +744,7 @@ export const register: Register = (on, options) => {
 
   // A run of reads folded into one line: each picture read, named, under the line.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    noteRow(e.requestId)
     if (e.surface !== 'terminal' || e.props.isExpanded) return next(e)
     const reads = e.props.calls.flatMap(call =>
       call.tool === 'Read' && call.tool_use_id && !call.isErrored && isReadImage(call.output) ? [{ id: call.tool_use_id, output: call.output, path: filePathOf(call.input) }] : [])
@@ -585,18 +766,21 @@ export const register: Register = (on, options) => {
 
   // A prompt you sent with pictures pasted in: the pictures under it, side by side.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    noteRow(e.requestId)
     if (e.surface !== 'terminal' || e.props.origin.kind !== 'composer') return next(e)
     const ids = idsIn(e.props.text)
     if (ids.length === 0) return next(e)
     await follow($)
+    // A pasted image's key names its session: after /clear the ids start again from 1.
+    const keyOf = (id: number) => `paste:${sessionId}:${id}`
     for (const id of ids) {
-      void load($, `paste:${id}`, async () => {
+      void load($, keyOf(id), async () => {
         let file = await pastedFile($, id)
         for (let tries = 0; !file && tries < WAIT_TRIES; tries++) {
           await $.clock.sleep(WAIT_MS)
           file = await pastedFile($, id)
         }
-        return file ? { file } : undefined
+        return file ? [{ file }] : []
       })
     }
     const site = siteOf($, e, MESSAGE_INDENT)
@@ -604,11 +788,11 @@ export const register: Register = (on, options) => {
     const { Box } = site.ui
     // Side by side, each in its share of the width.
     const share = { ...site, maxColumns: Math.max(8, Math.floor((site.maxColumns - (ids.length - 1)) / ids.length)) }
-    const shown = ids.filter(id => !('error' in (all[`paste:${id}`] ?? {})))
+    const shown = ids.filter(id => !('error' in (all[keyOf(id)] ?? {})))
     if (shown.length === 0) return next(e)
     return withPictures(site.ui, await next(e), MESSAGE_INDENT, [
       <Box key="pasted" flexDirection="row" columnGap={1}>
-        {shown.map(id => pictureOf($, share, all, `paste:${id}`, `[Image #${id}]`))}
+        {shown.map(id => pictureOf($, share, all, keyOf(id), `[Image #${id}]`))}
       </Box>
     ])
   })
@@ -618,6 +802,7 @@ export const register: Register = (on, options) => {
   // only names; the pointer on a chip opens that picture in a card over the rows above, a click opens
   // it in the system's viewer. Elsewhere (no pointer) the engine draws it, the embedded pictures under it.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    noteRow(e.requestId)
     if (!markdown || e.surface !== 'terminal') return next(e)
     const text = e.props.text
     // A cheap look first: most answers name no picture at all.
@@ -639,7 +824,9 @@ export const register: Register = (on, options) => {
         const file = absolute(target, cwd, home)
         if (!file) continue
         const key = `file:${file}`
-        void load($, key, async () => ((await $.fs.exists(file)) ? { file } : undefined))
+        void load($, key, async () => [{ file }])
+        // Not there yet, it is not drawn, but its file is still looked at again now and then.
+        void recheck($, key).catch(() => undefined)
         const picture = all[key]
         if (picture && 'error' in picture && picture.error === 'not found') continue
         targets.add(target)
@@ -659,9 +846,8 @@ export const register: Register = (on, options) => {
     const blocks = blocksOf(text)
     const named: string[][] = []
     for (const block of blocks) {
-      if (!references.has(block.text)) references.set(block.text, referencesIn($, block.text, cwd))
       const embedded = embeddedIn(block.text).flatMap(target => absolute(target, cwd, home) ?? [])
-      named.push((await references.get(block.text)!).filter(file => !embedded.includes(file)))
+      named.push((await namedIn($, block.text, cwd)).filter(file => !embedded.includes(file)))
     }
     const hasEmbedded = embeddedIn(text).length > 0
     if (!hasEmbedded && named.every(files => files.length === 0)) return next(e)
@@ -689,7 +875,8 @@ export const register: Register = (on, options) => {
       })
       const { drawn: pictures, targets } = embeddedOf(block.text, place)
       // A picture drawn under the block is not written in it too, as its alt and path.
-      const shown = block.text.replace(MARKDOWN_IMAGE, (match, alt, target) => (targets.has(target) ? '' : match)).trim()
+      const isDrawn = new Set(embeddedAt(block.text).filter(({ target }) => targets.has(target)).map(({ at }) => at))
+      const shown = block.text.replace(MARKDOWN_IMAGE, (match: string, alt: string, target: string, at: number) => (isDrawn.has(at) ? '' : match)).trim()
       return (
         <Box key={`block-${i}`} flexDirection="column" marginTop={block.gap ? 1 : 0}>
           {shown.length > 0 && (
@@ -715,21 +902,21 @@ export const register: Register = (on, options) => {
     // above its block where they hold it, else over those below, else over the most there are.
     let card: RenderElement | undefined
     const heights = blockRows.get(e.requestId) ?? []
-    if (open && heights.length >= blocks.length && heights.slice(0, open.block + 1).every(rows => rows > 0)) {
-      const tops: number[] = []
-      let at = 0
-      blocks.forEach((block, i) => {
-        at += block.gap ? 1 : 0
-        tops.push(at)
-        at += heights[i]!
-      })
-      const top = tops[open.block]!
+    // Each block up to the chip's must have said its height (a probe that has not is a hole).
+    const measured = open && Array.from({ length: open.block + 1 }, (_, i) => heights[i]).every(rows => typeof rows === 'number' && rows > 0)
+    if (open && measured) {
+      let top = 0
+      for (let i = 0; i <= open.block; i++) {
+        top += blocks[i]!.gap ? 1 : 0
+        if (i < open.block) top += heights[i]!
+      }
       const bottom = top + heights[open.block]!
       const first = onScreen?.first ?? 0
-      const last = onScreen?.last ?? at - 1
+      const last = onScreen?.last ?? onScreen?.of ?? bottom
       const viewportRows = e.viewport?.rows ?? 40
-      // Above the answer on screen: what the screen holds over its rows, when its top shows.
-      const outside = first === 0 ? Math.max(0, viewportRows - BOTTOM_ROWS - (last - first + 1)) : 0
+      // Above the answer on screen: the rows the screen holds over it, known only for the newest row,
+      // the one at the foot of the screen, whose top shows; any other may have rows under it.
+      const outside = first === 0 && isNewest(e.requestId) ? Math.max(0, viewportRows - BOTTOM_ROWS - (last - first + 1)) : 0
       const aboveIn = top - first
       const below = last - bottom + 1
       const caption = open.file.startsWith(`${cwd}/`) ? open.file.slice(cwd.length + 1) : open.file
@@ -781,7 +968,7 @@ export const register: Register = (on, options) => {
       return result
     }
     if (data?.isOver === true) {
-      void load($, `file:${path}`, async () => ({ file: path }))
+      void load($, `file:${path}`, async () => [{ file: path }])
       if (!isThis(await read($, hovered))) {
         hoveredAt = undefined
         await update($, hovered, () => ({ requestId: e.requestId, element: e.element, path }))

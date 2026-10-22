@@ -83,11 +83,46 @@ function interlacedRows (height: number) {
   return order
 }
 
+/** How many frames a GIF holds, counted without decoding any: its image descriptors. */
+export function countFrames (bytes: Uint8Array) {
+  if (!isGif(bytes) || bytes.length < 13) return 0
+  let at = 13
+  if (bytes[10]! & 0x80) at += 3 * (1 << ((bytes[10]! & 7) + 1))
+  const skipBlocks = () => {
+    while (at < bytes.length) {
+      const size = bytes[at++]!
+      if (size === 0) return
+      at += size
+    }
+  }
+  let count = 0
+  while (at < bytes.length) {
+    const kind = bytes[at++]!
+    if (kind === 0x3b) break
+    if (kind === 0x21) {
+      at++
+      skipBlocks()
+      continue
+    }
+    if (kind !== 0x2c) break
+    const packed = bytes[at + 8]!
+    at += 9
+    if (packed & 0x80) at += 3 * (1 << ((packed & 7) + 1))
+    at++
+    skipBlocks()
+    count++
+  }
+  return count
+}
+
 /**
  * Every frame of a GIF, each the whole canvas as it shows then (8-bit RGBA, transparent where
  * nothing is drawn), with its delay. At most `maxFrames`; past that the animation is cut.
+ *
+ * `side`, told the GIF's size and how many frames it keeps, says how large a frame may be kept:
+ * each is shrunk to it as it is decoded, so only one canvas is ever held at full size.
  */
-export function decodeGif (bytes: Uint8Array, maxFrames = 500): { width: number; height: number; frames: Frame[] } {
+export function decodeGif (bytes: Uint8Array, maxFrames = 500, side?: (width: number, height: number, frames: number) => number): { width: number; height: number; frames: Frame[] } {
   if (!isGif(bytes) || bytes.length < 13) throw new Error('not a GIF file')
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const width = view.getUint16(6, true)
@@ -105,6 +140,7 @@ export function decodeGif (bytes: Uint8Array, maxFrames = 500): { width: number;
 
   const canvas = new Uint8Array(width * height * 4)
   const frames: Frame[] = []
+  const keep = side ? side(width, height, Math.min(maxFrames, countFrames(bytes))) : Math.max(width, height)
   let delay = 0
   let transparent = -1
   let disposal = 0
@@ -177,7 +213,8 @@ export function decodeGif (bytes: Uint8Array, maxFrames = 500): { width: number;
         canvas[out + 3] = 255
       }
     }
-    frames.push({ width, height, data: canvas.slice(), delay: delay <= 10 ? SLOW_DELAY : Math.max(MIN_DELAY, delay) })
+    const kept = shrink({ width, height, data: canvas }, keep, keep)
+    frames.push({ ...kept, data: kept.data === canvas ? canvas.slice() : kept.data, delay: delay <= 10 ? SLOW_DELAY : Math.max(MIN_DELAY, delay) })
 
     // Disposal 2 clears the frame's area to transparent before the next.
     if (disposal === 2) {
