@@ -32,7 +32,7 @@
 A Claude Code mod: see pictures in the transcript, as the desktop app shows them. The images Claude reads, the ones you paste and the ones its answers embed are drawn under their rows; the ones an answer only names get a chip that shows the picture under the pointer; GIFs play.
 
 - **What Claude reads**: a `Read` of a PNG, JPEG, WebP or GIF shows the picture under its `⎿ Read image` line. A run of reads folded into one line (`Read 3 files`) shows each picture under it, named, and so does the same run unfolded (`--verbose`, or ctrl+o outside fullscreen).
-- **What you paste**: a prompt you sent with `[Image #N]` in it shows its pictures under it, side by side.
+- **What you paste**: while you write, the pictures pasted in the draft show in a strip above the prompt, small, side by side, each named `[Image #N]`; sent, the prompt shows them under it. A paste raises no edit event, so the box is looked at twice a second: a pasted picture reaches the strip within half a second.
 - **What Claude embeds**: an answer with `![alt](path)` to a picture on this machine shows it under the paragraph that embeds it. Links to the web, and to files that are not there, draw nothing.
 - **What Claude names**: an answer that mentions a picture (`docs/media/leads.gif`, or just `leads.gif`) gets a chip beside the paragraph or list item that names it. Put the pointer on a chip and the picture opens in a card over the answer; move it off and the card closes; click it and the picture opens in the system's viewer. A name with no folder is looked for among the files under the working folder (`git ls-files`, ignored files left out); a name that matches no file gets no chip.
 
@@ -98,12 +98,13 @@ The repository is private for now: adding it needs access to it, and git signed 
 - The chips need the pointer, so Claude Code's fullscreen interface (`"tui": "fullscreen"` in your settings, or `/config`). The card opens over the rows above the chip's block, or below it where the rows above are too few, up to 24 for the picture.
 - To put the chips beside their blocks, the mod draws such an answer itself, block by block, with the markdown renderer the engine draws replies with: an answer with no picture in it is the engine's as ever. Off fullscreen the engine draws it, the embedded pictures under it.
 - Hovering the name inside the answer itself cannot open the card: the mod is not told where each word of an answer lands once it wraps, so the chips stand beside its block.
-- Beside [Image Preview](https://github.com/midudev/better-claude/tree/main/plugins/image-preview), the pasted pictures show under the prompt and hovering an `[Image #N]` is meant to still open its card; the two together have not been tried yet.
+- It covers what [Image Preview](https://github.com/midudev/better-claude/tree/main/plugins/image-preview) shows in a terminal that draws pictures (the draft's pictures, and the sent prompt's), drawn in place where Image Preview opens a card under the pointer: with this mod there is no need for that one. What it does not do is Image Preview's window of its own, at full quality, for a terminal that cannot draw pictures (Warp, iTerm2, Terminal.app, VS Code): there this mod draws cells. The two together have not been tried; both draw a strip above the prompt.
 
 ## How it works
 
 One hooks module ([`hooks/register.tsx`](hooks/register.tsx)), a GIF decoder ([`hooks/gif.ts`](hooks/gif.ts)) and the cell painter ([`hooks/pixels.ts`](hooks/pixels.ts), from Image Preview):
 
+- An `AbovePrompt` hook draws the draft's strip from a list of its `[Image #N]` kept by `prompt.edit` and a look at the box twice a second.
 - `ui.render` hooks on `ToolResult` and `ToolGroup` (Read calls whose output is an image), `UserMessage` (the `[Image #N]` of a sent prompt) and `AssistantMessage` (markdown images, and the pictures an answer names) draw the engine's row, then the pictures or chips under it.
 - Each chip is a `Client` ([`hooks/chip.tsx`](hooks/chip.tsx), as in Image Preview) that posts when the pointer comes onto it, leaves it and clicks it; a `ui.message` hook keeps which chip has the pointer, and the answer draws the card last, `position: "absolute"`, over the rows above the chip's block (or below it, where the rows above are too few), so nothing moves under the pointer and no block paints over it. Where each block is comes from a probe in it ([`hooks/probe.tsx`](hooks/probe.tsx)), an unpainted `Client` as tall as its block, that says how many rows it was laid out in.
 - Each picture is read once, in the background: a GIF is decoded into frames and each written to a raw RGBA file; another picture is drawn from its PNG, or a PNG `sips` or ImageMagick writes. The rows that wait on it draw again.

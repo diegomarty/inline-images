@@ -14,6 +14,8 @@ declare module 'claude-code' {
       pictures: Record<string, Picture>
       /** The chip under an answer the pointer is on, whose picture shows in a card; null while none is. */
       hovered: Hovered | null
+      /** The `[Image #N]` ids in the prompt box, in the order typed: the strip above it. */
+      draft: number[]
       /** What `/images` set: pictures drawn or not, and their size; kept across a reload. */
       view: View
     }

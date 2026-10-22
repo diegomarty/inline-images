@@ -13,6 +13,7 @@ type Ui = Elements['terminal']
 
 const pictures = atom({ plugin: 'inline-images', key: 'pictures' } as const, {} as Record<string, Picture>)
 const hovered = atom({ plugin: 'inline-images', key: 'hovered' } as const, null as Hovered | null)
+const draft = atom({ plugin: 'inline-images', key: 'draft' } as const, [] as number[])
 const view = atom({ plugin: 'inline-images', key: 'view' } as const, { isOn: true, size: 'medium' } as View)
 
 const TOKEN = /\[Image #(\d+)\]/g
@@ -55,6 +56,10 @@ const MAX_FRAMES = 300
 // The engine writes a pasted image just after the paste puts its placeholder in the box.
 const WAIT_MS = 200
 const WAIT_TRIES = 15
+// Pasting an image puts its `[Image #N]` in the prompt box with no edit event: the box is looked at
+// this often. The strip of the draft's pictures above it takes this many rows a picture at most.
+const POLL_MS = 500
+const DRAFT_ROWS = 5
 // A picture an answer names without drawing it: in a link's target, in code, or bare.
 const REFERENCE = /\]\(\s*<?([^)\s>]+\.(?:png|jpe?g|gif|webp))>?[^)]*\)|`([^`\n]+\.(?:png|jpe?g|gif|webp))`|((?:~|\.{1,2})?\/?[\w@%+.-]+(?:\/[\w@%+.-]+)*\.(?:png|jpe?g|gif|webp))(?![\w/])/gi
 const WEB_LINK = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi
@@ -155,6 +160,35 @@ async function pastedFile ($: Engine, id: number) {
   if (!found) return undefined
   const name = (await $.fs.list(`${found}/images`).catch(() => [])).find(entry => entry.name.startsWith(`${id}.`))?.name
   return name && /^\d+\.[a-z]+$/.test(name) ? `${found}/images/${name}` : undefined
+}
+
+/** The key of pasted image `id`: it names the session, as after /clear the ids start again from 1. */
+const pasteKey = (id: number) => `paste:${sessionId}:${id}`
+
+/** Reads pasted image `id`, waiting a little for the engine, which writes it just after the paste. */
+function loadPaste ($: Engine, id: number) {
+  void load($, pasteKey(id), async () => {
+    let file = await pastedFile($, id)
+    for (let tries = 0; !file && tries < WAIT_TRIES; tries++) {
+      await $.clock.sleep(WAIT_MS)
+      file = await pastedFile($, id)
+    }
+    return file ? [{ file }] : []
+  })
+}
+
+/**
+ * Keeps the strip's list of the draft's pictures in step with the prompt box, and reads each as it
+ * comes into the draft: a picture is ready by the time the strip draws it, and an [Image #N] typed
+ * by hand, with none behind it, is known as such.
+ */
+async function track ($: Engine, text: string) {
+  const ids = idsIn(text)
+  const now = await read($, draft)
+  if (ids.length === now.length && ids.every((id, i) => id === now[i])) return
+  await update($, draft, () => ids)
+  await follow($)
+  for (const id of ids) loadPaste($, id)
 }
 
 /**
@@ -827,6 +861,13 @@ export const register: Register = (on, options) => {
     void sweep($, 'old')
     // A reload keeps what /images set.
     apply(await read($, view))
+    await track($, (await $.prompt.read()).text)
+    if (e.isInteractive) {
+      // A look that fails (the module unloading under it) waits for the next.
+      $.clock.every(POLL_MS, () => {
+        if (isOn) void $.prompt.read().then(box => track($, box.text)).catch(() => undefined)
+      })
+    }
     await $.command.register({ name: 'images', description: 'Inline Images: turn the pictures on or off, or set their size', argumentHint: 'on | off | small | medium | large', immediate: true })
     return result
   })
@@ -858,6 +899,51 @@ export const register: Register = (on, options) => {
     await update($, pictures, () => ({}))
     await update($, hovered, () => null)
     return result
+  })
+
+  // Typing changes the draft: the strip follows it at once.
+  on('prompt.edit', async ($, e, next) => {
+    const box = await next(e)
+    if (isOn) await track($, box.text)
+    return box
+  })
+
+  // Above the prompt, while you write: the pictures pasted in the draft, side by side, each named,
+  // small; a click opens one. Sent, they show under the prompt, the same pictures read once.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (!isOn || e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
+    const ids = await read($, draft)
+    if (ids.length === 0) return next(e)
+    await follow($)
+    for (const id of ids) loadPaste($, id)
+    const all = await read($, pictures)
+    // An [Image #N] typed by hand, with no picture behind it, draws nothing.
+    const shown = ids.filter(id => (all[pasteKey(id)] as { error?: string } | undefined)?.error !== 'not found')
+    if (shown.length === 0) return next(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text } = ui
+    const site: Site = {
+      ui,
+      requestId: e.requestId,
+      maxColumns: Math.max(8, Math.floor((e.props.bodyColumns - 2 * (shown.length - 1)) / shown.length)),
+      maxRows: Math.max(1, Math.min(DRAFT_ROWS, e.props.maxRows - 2)),
+      isShown: true,
+      animate,
+      canClick: e.viewport?.isFullscreen !== false
+    }
+    return (
+      <Box flexDirection="column">
+        {await next(e)}
+        <Box key="draft" flexDirection="row" columnGap={2}>
+          {shown.map(id => (
+            <Box key={`draft-${id}`} flexDirection="column">
+              {pictureOf($, site, all, pasteKey(id), `[Image #${id}]`, 'draft')}
+              <Text dimColor>{`[Image #${id}]`}</Text>
+            </Box>
+          ))}
+        </Box>
+      </Box>
+    )
   })
 
   // The row of a Read call names the file it read: its picture is read from there, at full size.
@@ -916,28 +1002,17 @@ export const register: Register = (on, options) => {
     const ids = idsIn(e.props.text)
     if (ids.length === 0) return next(e)
     await follow($)
-    // A pasted image's key names its session: after /clear the ids start again from 1.
-    const keyOf = (id: number) => `paste:${sessionId}:${id}`
-    for (const id of ids) {
-      void load($, keyOf(id), async () => {
-        let file = await pastedFile($, id)
-        for (let tries = 0; !file && tries < WAIT_TRIES; tries++) {
-          await $.clock.sleep(WAIT_MS)
-          file = await pastedFile($, id)
-        }
-        return file ? [{ file }] : []
-      })
-    }
+    for (const id of ids) loadPaste($, id)
     const site = siteOf($, e, MESSAGE_INDENT)
     const all = await read($, pictures)
     const { Box } = site.ui
     // Side by side, each in its share of the width.
     const share = { ...site, maxColumns: Math.max(8, Math.floor((site.maxColumns - (ids.length - 1)) / ids.length)) }
-    const shown = ids.filter(id => !('error' in (all[keyOf(id)] ?? {})))
+    const shown = ids.filter(id => !('error' in (all[pasteKey(id)] ?? {})))
     if (shown.length === 0) return next(e)
     return withPictures(site.ui, await next(e), MESSAGE_INDENT, [
       <Box key="pasted" flexDirection="row" columnGap={1}>
-        {shown.map(id => pictureOf($, share, all, keyOf(id), `[Image #${id}]`))}
+        {shown.map(id => pictureOf($, share, all, pasteKey(id), `[Image #${id}]`))}
       </Box>
     ])
   })

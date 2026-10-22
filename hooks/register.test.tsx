@@ -59,7 +59,8 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   const asked = { sessionId: 0 }
   mock.env(on, env)
   const session = { id: 's-1' }
-  // The folders made.
+  // The prompt box: what is typed in it so far. The folders made.
+  const box = { text: '' }
   const made = new Set<string>()
   const mtimes: Record<string, number> = {}
   const runs: { argv: string[]; stdin?: string }[] = []
@@ -75,6 +76,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   })
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('prompt.read', () => ({ value: { text: box.text, cursor: box.text.length } }))
   on('session.root', () => ({ value: '/project/app' }))
   on('session.cwd', () => ({ value: '/project/app' }))
   on('process.run', ($, e) => {
@@ -136,7 +138,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
-  return { clock, runs, reads, exists, stats, blits, files, mtimes, tracked, session, asked }
+  return { clock, runs, reads, exists, stats, blits, files, mtimes, tracked, session, asked, box }
 }
 
 const startSession = ($: Engine) => $.session.start({ cwd: '/project/app', surface: 'terminal', isInteractive: true })
@@ -608,6 +610,46 @@ test('/images off stops the GIFs playing', async ($, on) => {
   await images($, 'off')
   await w.clock.advance(1000)
   expect(w.blits).toHaveLength(1)
+})
+
+// --- The strip above the prompt: the draft's pictures, before it is sent.
+
+const BAND = { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 20 }, view: {} }
+const strip = ($: Engine) => $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'AbovePrompt', props: BAND, viewport: SCREEN })
+const FOLDER = '/tmp/claude-501/-project-app/s-1/images'
+
+test('a picture pasted in the draft shows above the prompt, small, named; one typed by hand does not', async ($, on) => {
+  const w = world(on, { files: { [FOLDER]: '', [`${FOLDER}/1.png`]: PNG } })
+  w.box.text = 'what is wrong here? [Image #1] [Image #9]'
+  await startSession($)
+  await w.clock.advance(4000)
+  const band = await strip($)
+  expect(await band.find({ type: 'Image' })).toMatchObject({ props: { source: { file: `${FOLDER}/1.png` }, alt: '[Image #1]' } })
+  expect(await band.find({ type: 'Text', text: '[Image #1]' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /Image #9/ })).toBeUndefined()
+})
+
+test('a paste, which raises no edit, reaches the strip within half a second; a picture cleared from the draft leaves it', async ($, on) => {
+  const w = world(on, { files: { [FOLDER]: '', [`${FOLDER}/1.png`]: PNG } })
+  await startSession($)
+  const band = await strip($)
+  expect(await band.find({ type: 'Image' })).toBeUndefined()
+  w.box.text = '[Image #1]'
+  await w.clock.advance(500)
+  await w.clock.advance(10)
+  expect(await band.find({ type: 'Image' })).toMatchObject({ props: { alt: '[Image #1]' } })
+  w.box.text = ''
+  await w.clock.advance(500)
+  expect(await band.find({ type: 'Image' })).toBeUndefined()
+})
+
+test('with /images off the strip is not drawn', async ($, on) => {
+  const w = world(on, { files: { [FOLDER]: '', [`${FOLDER}/1.png`]: PNG } })
+  w.box.text = '[Image #1]'
+  await startSession($)
+  await images($, 'off')
+  const band = await strip($)
+  expect(await band.find({ type: 'Image' })).toBeUndefined()
 })
 
 // --- The cache folder: never written to once removed.
