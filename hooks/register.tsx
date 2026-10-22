@@ -16,6 +16,7 @@ const hovered = atom({ plugin: 'inline-images', key: 'hovered' } as const, null 
 const draft = atom({ plugin: 'inline-images', key: 'draft' } as const, [] as number[])
 const view = atom({ plugin: 'inline-images', key: 'view' } as const, { isOn: true, size: 'medium' } as View)
 
+
 const TOKEN = /\[Image #(\d+)\]/g
 // `![alt](path)`, an optional title after the path.
 const MARKDOWN_IMAGE = /!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g
@@ -606,6 +607,7 @@ let maxRows = 12
 let animate = true
 let isOn = true
 const SIZE_ROWS = { small: 6, large: 24 }
+const START_VIEW: View = { isOn: true, size: 'medium' }
 
 /** Draws the pictures as `/images` set: off, none (each row the engine's own), and nothing plays. */
 function apply ({ isOn: on, size }: View) {
@@ -938,6 +940,9 @@ export const register: Register = (on, options) => {
     await sweepEnded($, e.sessionId)
     await update($, pictures, () => ({}))
     await update($, hovered, () => null)
+    // The next session starts as any does: pictures on, at medium.
+    await update($, view, () => START_VIEW)
+    apply(START_VIEW)
     return result
   })
 

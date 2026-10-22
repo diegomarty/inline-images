@@ -724,3 +724,13 @@ test('/images off closes a card left open: on again, it does not come back', asy
   expect(await (await answer($, 'Saved as shot.png.', 'a-1b')).find({ key: 'card' })).toBeUndefined()
   expect(await row.find({ key: 'card' })).toBeUndefined()
 })
+
+test('a session after /clear starts with pictures on, whatever /images set', async ($, on) => {
+  const w = world(on)
+  await startSession($)
+  await images($, 'off')
+  await $.session.end({ reason: 'clear', sessionId: 's-1', resume: { id: 's-1' } })
+  w.session.id = 's-2'
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Image' })).toBeDefined()
+})
