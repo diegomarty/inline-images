@@ -57,8 +57,11 @@ const MAX_FRAMES = 300
 // The engine writes a pasted image just after the paste puts its placeholder in the box.
 const WAIT_MS = 200
 const WAIT_TRIES = 15
-// The strip of the draft's pictures above the prompt takes this many rows a picture at most.
+// The strip of the draft's pictures above the prompt takes this many rows a picture at most; pasted
+// pictures side by side stand this far apart, each at least this wide.
 const DRAFT_ROWS = 5
+const PASTE_GAP = 2
+const PASTE_COLUMNS = 8
 // A pasted picture not found (the engine slow to write it, or an [Image #N] typed before the paste
 // that gets that id) is looked for again once this old.
 const PASTE_RETRY_MS = 10000
@@ -623,14 +626,14 @@ const describe = ({ isOn: on, size }: View) =>
   on ? `Inline Images: on, pictures ${size} (up to ${size === 'medium' ? optionRows : SIZE_ROWS[size]} rows).` : 'Inline Images: off. /images to turn it on.'
 
 /** Where a row's pictures are drawn, and how large they may be. */
-function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessage' | 'AssistantMessage'>, indent: number): Site {
+function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessage' | 'AssistantMessage' | 'AbovePrompt'>, indent: number): Site {
   return {
     ui: $.ui.resolve(e),
     requestId: e.requestId,
     maxColumns: Math.max(8, Math.min(MAX_COLUMNS, (e.viewport?.columns ?? 80) - indent - 2)),
     maxRows,
     // Off screen (`null`) an animation stops; a surface that does not say counts as on screen.
-    isShown: e.props.onScreen !== null,
+    isShown: !('onScreen' in e.props) || e.props.onScreen !== null,
     animate,
     // The pointer reaches a picture in fullscreen alone.
     canClick: e.viewport?.isFullscreen !== false
@@ -708,6 +711,37 @@ function cardOf ($: Engine, site: Site, all: Record<string, Picture>, key: strin
       <Text dimColor>{fill(name, width)}</Text>
     </Box>
   ), height]
+}
+
+/**
+ * Pasted pictures side by side, each in its share of the width, and in the strip its `[Image #N]`
+ * under it: as many as fit, the rest counted. One with no picture behind it (an [Image #N] typed by
+ * hand) draws nothing; one that cannot be read says why.
+ */
+function pastedRow ($: Engine, site: Site, all: Record<string, Picture>, ids: number[], isNamed: boolean): RenderElement | undefined {
+  const { Box, Text } = site.ui
+  const shown = ids.filter(id => (all[pasteKey(id)] as { error?: string } | undefined)?.error !== 'not found')
+  if (shown.length === 0) return undefined
+  const label = (id: number) => `[Image #${id}]`
+  const more = (n: number) => `+${n} more`
+  const least = isNamed ? Math.max(...shown.map(id => label(id).length)) : PASTE_COLUMNS
+  const width = (n: number) => n * least + PASTE_GAP * (n - 1) + (n < shown.length ? PASTE_GAP + more(shown.length - n).length : 0)
+  let count = shown.length
+  while (count > 1 && width(count) > site.maxColumns) count--
+  const rest = shown.length - count
+  const room = site.maxColumns - PASTE_GAP * (count - 1) - (rest > 0 ? PASTE_GAP + more(rest).length : 0)
+  const share = { ...site, maxColumns: Math.max(1, Math.floor(room / count)) }
+  return (
+    <Box key="pasted" flexDirection="row" columnGap={PASTE_GAP}>
+      {shown.slice(0, count).map(id => (
+        <Box key={`pasted-${id}`} flexDirection="column" flexShrink={0}>
+          {pictureOf($, share, all, pasteKey(id), label(id), 'pasted')}
+          {isNamed && <Text dimColor wrap="truncate-end">{label(id)}</Text>}
+        </Box>
+      ))}
+      {rest > 0 && <Text dimColor>{more(rest)}</Text>}
+    </Box>
+  )
 }
 
 /** A row drawn as the engine draws it, the pictures under it. */
@@ -969,31 +1003,14 @@ export const register: Register = (on, options) => {
     await follow($)
     for (const id of ids) loadPaste($, id)
     const all = await read($, pictures)
-    // An [Image #N] typed by hand, with no picture behind it, draws nothing.
-    const shown = ids.filter(id => (all[pasteKey(id)] as { error?: string } | undefined)?.error !== 'not found')
-    if (shown.length === 0) return next(e)
-    const ui = $.ui.resolve(e)
-    const { Box, Text } = ui
-    const site: Site = {
-      ui,
-      requestId: e.requestId,
-      maxColumns: Math.max(8, Math.floor((e.props.bodyColumns - 2 * (shown.length - 1)) / shown.length)),
-      maxRows: Math.max(1, Math.min(DRAFT_ROWS, e.props.maxRows - 2)),
-      isShown: true,
-      animate,
-      canClick: e.viewport?.isFullscreen !== false
-    }
+    const site = { ...siteOf($, e, 0), maxColumns: e.props.bodyColumns, maxRows: Math.max(1, Math.min(DRAFT_ROWS, e.props.maxRows - 2)) }
+    const row = pastedRow($, site, all, ids, true)
+    if (!row) return next(e)
+    const { Box } = site.ui
     return (
       <Box flexDirection="column">
         {await next(e)}
-        <Box key="draft" flexDirection="row" columnGap={2}>
-          {shown.map(id => (
-            <Box key={`draft-${id}`} flexDirection="column">
-              {pictureOf($, site, all, pasteKey(id), `[Image #${id}]`, 'draft')}
-              <Text dimColor>{`[Image #${id}]`}</Text>
-            </Box>
-          ))}
-        </Box>
+        {row}
       </Box>
     )
   })
@@ -1056,17 +1073,8 @@ export const register: Register = (on, options) => {
     await follow($)
     for (const id of ids) loadPaste($, id)
     const site = siteOf($, e, MESSAGE_INDENT)
-    const all = await read($, pictures)
-    const { Box } = site.ui
-    // Side by side, each in its share of the width.
-    const share = { ...site, maxColumns: Math.max(8, Math.floor((site.maxColumns - (ids.length - 1)) / ids.length)) }
-    const shown = ids.filter(id => !('error' in (all[pasteKey(id)] ?? {})))
-    if (shown.length === 0) return next(e)
-    return withPictures(site.ui, await next(e), MESSAGE_INDENT, [
-      <Box key="pasted" flexDirection="row" columnGap={1}>
-        {shown.map(id => pictureOf($, share, all, pasteKey(id), `[Image #${id}]`))}
-      </Box>
-    ])
+    const row = pastedRow($, site, await read($, pictures), ids, false)
+    return row ? withPictures(site.ui, await next(e), MESSAGE_INDENT, [row]) : next(e)
   })
 
   // An answer with pictures. In fullscreen the mod draws it block by block: a picture it embeds

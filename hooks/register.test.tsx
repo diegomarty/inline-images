@@ -642,7 +642,6 @@ test('the draft is read once as the session starts, then followed by its edits a
   expect(await (await strip($)).find({ type: 'Image' })).toMatchObject({ props: { alt: '[Image #1]' } })
 })
 
-
 test('with /images off the strip is not drawn', async ($, on) => {
   const w = world(on, { files: { [FOLDER]: '', [`${FOLDER}/1.png`]: PNG } })
   w.box.text = '[Image #1]'
@@ -733,4 +732,31 @@ test('a session after /clear starts with pictures on, whatever /images set', asy
   w.session.id = 's-2'
   const row = await resultRow($, 'tu-1', image(PNG))
   expect(await row.find({ type: 'Image' })).toBeDefined()
+})
+
+test('a narrow strip draws the pictures that fit, their names whole, and counts the rest', async ($, on) => {
+  const files: Record<string, string> = { [FOLDER]: '' }
+  for (const id of [1, 2, 3, 4, 5]) files[`${FOLDER}/${id}.png`] = PNG
+  const w = world(on, { files })
+  w.box.text = '[Image #1] [Image #2] [Image #3] [Image #4] [Image #5]'
+  await startSession($)
+  await w.clock.advance(10)
+  const band = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, bodyColumns: 40 }, viewport: SCREEN })
+  // Each column is at least its name, 10 cells; two of them, the gap and "+3 more" fit in 40.
+  expect((await band.findAll({ type: 'Image' })).map(image => image.props.alt)).toEqual(['[Image #1]', '[Image #2]'])
+  expect(await band.find({ type: 'Text', text: '+3 more' })).toBeDefined()
+})
+
+test('a sent prompt shares the width among the pictures it draws, not one typed by hand', async ($, on) => {
+  // A PNG whose header says 1600 by 200: as wide as its share lets it.
+  const wide = decoded(PNG)
+  new DataView(wide.buffer).setUint32(16, 1600)
+  new DataView(wide.buffer).setUint32(20, 200)
+  const w = world(on, { files: { [FOLDER]: '', [`${FOLDER}/1.png`]: wide.toBase64() } })
+  await startSession($)
+  const sent = () => $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'UserMessage', requestId: 'm-1', props: { text: '[Image #1] [Image #7]', origin: { kind: 'composer' }, isExpanded: false }, viewport: SCREEN })
+  await sent()
+  await w.clock.advance(4000)
+  const row = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'UserMessage', requestId: 'm-2', props: { text: '[Image #1] [Image #7]', origin: { kind: 'composer' }, isExpanded: false }, viewport: SCREEN })
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { columns: 116 } })
 })
