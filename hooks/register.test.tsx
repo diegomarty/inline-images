@@ -72,6 +72,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     return { value: session.id }
   })
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('session.root', () => ({ value: '/project/app' }))
   on('session.cwd', () => ({ value: '/project/app' }))
   on('process.run', ($, e) => {
@@ -220,6 +221,10 @@ test('a local picture an answer links to shows under it; a link to no file draws
   expect(await missing.find({ type: 'Image' })).toBeUndefined()
   expect(await missing.find({ type: 'Text', text: /no preview/ })).toBeUndefined()
 })
+
+/** `/images <args>`, as the person types it. */
+const images = ($: Engine, args: string) =>
+  $.command.run({ command: 'images', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
 
 const answer = ($: Engine, text: string, requestId = 'a-1', onScreen: { first: number; last: number; of: number } | null = { first: 0, last: 9, of: 10 }) =>
   $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'AssistantMessage', requestId, props: { text, isFirstOfReply: true, onScreen }, viewport: SCREEN })
@@ -554,4 +559,45 @@ test('off fullscreen there is no pointer: a picture takes no click region', asyn
   const row = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'ToolResult', requestId: 'tu-1', props: { tool_use_id: 'tu-1', tool: 'Read', output: image(PNG), isErrored: false }, viewport: { ...SCREEN, isFullscreen: false } })
   expect(await row.find({ type: 'Image' })).toBeDefined()
   expect(await row.findAll({ type: 'Client' })).toHaveLength(0)
+})
+
+// --- /images.
+
+test('/images turns the pictures off and on again, and sets their size', async ($, on) => {
+  world(on)
+  await startSession($)
+  const run = async (args: string) => (await images($, args)).text
+  // A PNG whose header says 800 by 800: as many rows as the size allows.
+  const header = decoded(PNG)
+  new DataView(header.buffer).setUint32(16, 800)
+  new DataView(header.buffer).setUint32(20, 800)
+  const tall = image(header.toBase64())
+  const rowsOf = async (id: string) => {
+    const row = await resultRow($, id, tall)
+    return (await row.find({ type: 'Image' }))?.props.rows
+  }
+  expect(await rowsOf('tu-1')).toBe(12)
+
+  expect(await run('off')).toBe('Inline Images: off. /images to turn it on.')
+  const off = await resultRow($, 'tu-2', tall)
+  expect(await off.find({ type: 'Image' })).toBeUndefined()
+  expect(await off.find({ key: 'engine' })).toBeDefined()
+
+  expect(await run('')).toBe('Inline Images: on, pictures medium (up to 12 rows).')
+  expect(await run('small')).toBe('Inline Images: on, pictures small (up to 6 rows).')
+  expect(await rowsOf('tu-3')).toBe(6)
+  expect(await run('large')).toBe('Inline Images: on, pictures large (up to 24 rows).')
+  expect(await rowsOf('tu-4')).toBe(24)
+  expect(await run('huge')).toBe('/images huge: not a choice. Use on, off, small, medium or large. Inline Images: on, pictures large (up to 24 rows).')
+})
+
+test('/images off stops the GIFs playing', async ($, on) => {
+  const w = world(on)
+  await startSession($)
+  await resultRow($, 'tu-1', image(gif([0, 1]).toBase64(), 'image/gif'))
+  await w.clock.advance(200)
+  expect(w.blits).toHaveLength(1)
+  await images($, 'off')
+  await w.clock.advance(1000)
+  expect(w.blits).toHaveLength(1)
 })

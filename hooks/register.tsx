@@ -5,7 +5,7 @@ import { Budget } from './budget'
 import { decodeGif, isGif } from './gif'
 import { parseBmp, toCells } from './pixels'
 import type { Pixels } from './pixels'
-import type { Hovered, Picture } from '../types'
+import type { Hovered, Picture, View } from '../types'
 
 type Engine = EngineInterface
 type RenderOf<C extends string> = Extract<EventOf['ui.render'], { component: C, surface: 'terminal' }>
@@ -13,6 +13,7 @@ type Ui = Elements['terminal']
 
 const pictures = atom({ plugin: 'inline-images', key: 'pictures' } as const, {} as Record<string, Picture>)
 const hovered = atom({ plugin: 'inline-images', key: 'hovered' } as const, null as Hovered | null)
+const view = atom({ plugin: 'inline-images', key: 'view' } as const, { isOn: true, size: 'medium' } as View)
 
 const TOKEN = /\[Image #(\d+)\]/g
 // `![alt](path)`, an optional title after the path.
@@ -519,9 +520,26 @@ function play ($: Engine, requestId: string, element: string, key: string, colum
 
 type Site = { ui: Ui; requestId: string; maxColumns: number; maxRows: number; isShown: boolean; animate: boolean; canClick: boolean }
 
-// The options: the most rows a picture takes, and whether GIFs play.
+// The options: the most rows a picture takes, and whether GIFs play. And what `/images` set: whether
+// pictures are drawn at all, and the most rows small and large ones take (medium: the option's).
+let optionRows = 12
 let maxRows = 12
 let animate = true
+let isOn = true
+const SIZE_ROWS = { small: 6, large: 24 }
+
+/** Draws the pictures as `/images` set: off, none (each row the engine's own), and nothing plays. */
+function apply ({ isOn: on, size }: View) {
+  isOn = on
+  maxRows = size === 'medium' ? optionRows : SIZE_ROWS[size]
+  if (on) return
+  for (const play of playing.values()) play.timer?.cancel()
+  playing.clear()
+}
+
+/** What `/images` answers: how pictures are drawn now. */
+const describe = ({ isOn: on, size }: View) =>
+  on ? `Inline Images: on, pictures ${size} (up to ${size === 'medium' ? optionRows : SIZE_ROWS[size]} rows).` : 'Inline Images: off. /images to turn it on.'
 
 /** Where a row's pictures are drawn, and how large they may be. */
 function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessage' | 'AssistantMessage'>, indent: number): Site {
@@ -775,7 +793,8 @@ function blocksOf (text: string) {
 }
 
 export const register: Register = (on, options) => {
-  maxRows = Math.max(3, Math.min(60, Math.round(Number(options.rows ?? 12))))
+  optionRows = Math.max(3, Math.min(60, Math.round(Number(options.rows ?? 12))))
+  maxRows = optionRows
   animate = options.animate !== false
   const markdown = options.markdown !== false
 
@@ -797,7 +816,27 @@ export const register: Register = (on, options) => {
     await update($, pictures, () => ({}))
     await update($, hovered, () => null)
     void sweep($, 'old')
+    // A reload keeps what /images set.
+    apply(await read($, view))
+    await $.command.register({ name: 'images', description: 'Inline Images: turn the pictures on or off, or set their size', argumentHint: 'on | off | small | medium | large', immediate: true })
     return result
+  })
+
+  // /images turns the pictures off and on again, or sets their size (and turns them on); every row
+  // draws again.
+  on('command.run', { command: 'images' }, async ($, e) => {
+    const word = e.args.trim().toLowerCase()
+    const now = await read($, view)
+    const sizes = ['small', 'medium', 'large'] as const
+    const size = sizes.find(name => name === word)
+    if (word !== '' && word !== 'on' && word !== 'off' && !size) {
+      return { text: `/images ${word}: not a choice. Use on, off, small, medium or large. ${describe(now)}` }
+    }
+    const next: View = size ? { isOn: true, size } : { ...now, isOn: word === '' ? !now.isOn : word === 'on' }
+    await update($, view, () => next)
+    apply(next)
+    $.ui.invalidate('ui.render')
+    return { text: describe(next) }
   })
 
   // A session that ends takes its cache with it. After a /clear the process goes on under a new
@@ -826,6 +865,7 @@ export const register: Register = (on, options) => {
   // A Read of a picture: the picture under its `⎿ Read image` line.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     noteRow(e.requestId)
+    if (!isOn) return next(e)
     if (e.surface !== 'terminal' || e.props.tool !== 'Read' || e.props.isErrored || !isReadImage(e.props.output)) return next(e)
     await follow($)
     const key = loadRead($, e.props.tool_use_id, e.props.output)
@@ -837,6 +877,7 @@ export const register: Register = (on, options) => {
   // A run of reads folded into one line: each picture read, named, under the line.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     noteRow(e.requestId)
+    if (!isOn) return next(e)
     // Folded, the group is one count line; unfolded (--verbose, the ctrl+o transcript outside
     // fullscreen), a row a call, which draws its result inline with no ToolResult of its own: either
     // way its pictures are drawn under it, named.
@@ -862,6 +903,7 @@ export const register: Register = (on, options) => {
   // A prompt you sent with pictures pasted in: the pictures under it, side by side.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     noteRow(e.requestId)
+    if (!isOn) return next(e)
     if (e.surface !== 'terminal' || e.props.origin.kind !== 'composer') return next(e)
     const ids = idsIn(e.props.text)
     if (ids.length === 0) return next(e)
@@ -898,6 +940,7 @@ export const register: Register = (on, options) => {
   // it in the system's viewer. Elsewhere (no pointer) the engine draws it, the embedded pictures under it.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     noteRow(e.requestId)
+    if (!isOn) return next(e)
     if (!markdown || e.surface !== 'terminal') return next(e)
     const text = e.props.text
     // A cheap look first: most answers name no picture at all.

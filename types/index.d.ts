@@ -4,6 +4,9 @@ export type Picture = { width: number; height: number; frames: number } | { erro
 /** The chip the pointer is on: the answer it is under, by `requestId`, its key, and the picture it names. */
 export type Hovered = { requestId: string; element: string; path: string }
 
+/** What `/images` set for the session: whether pictures are drawn, and how large. */
+export type View = { isOn: boolean; size: 'small' | 'medium' | 'large' }
+
 declare module 'claude-code' {
   interface PluginState {
     'inline-images': {
@@ -11,6 +14,8 @@ declare module 'claude-code' {
       pictures: Record<string, Picture>
       /** The chip under an answer the pointer is on, whose picture shows in a card; null while none is. */
       hovered: Hovered | null
+      /** What `/images` set: pictures drawn or not, and their size; kept across a reload. */
+      view: View
     }
   }
 }

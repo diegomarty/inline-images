@@ -53,6 +53,18 @@ In Ghostty and kitty the terminal draws the picture itself, through the kitty gr
 
 A picture takes as many cells as fit its shape, never much more than its own size, up to the **Picture height** option (`/config`, 12 rows by default) and 120 columns.
 
+## /images
+
+Turn the pictures off and on again for the session, or set their size, without going to `/config`:
+
+| Command | |
+| --- | --- |
+| `/images` | Off if on, on if off |
+| `/images off` · `/images on` | Every row draws as Claude Code's own; or with its pictures again |
+| `/images small` · `medium` · `large` | Pictures up to 6 rows, the **Picture height** option's, or 24; and on |
+
+It answers with how pictures are drawn now. A reload of the mod keeps what it set; a new session starts with pictures on, at medium.
+
 ## Options
 
 | Option | Default | |
