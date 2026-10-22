@@ -51,7 +51,7 @@ const VIEW_BYTES = 2 * 1024 * 1024
 const CELL_SOURCE_PIXELS = 800
 // A GIF's frames are shrunk to this side, and all of them together to this many bytes.
 const FRAME_PIXELS = 480
-const FRAME_BUDGET = 48 * 1024 * 1024
+const FRAME_BUDGET = 24 * 1024 * 1024
 const MAX_FRAMES = 300
 // The engine writes a pasted image just after the paste puts its placeholder in the box.
 const WAIT_MS = 200
@@ -60,6 +60,9 @@ const WAIT_TRIES = 15
 // this often. The strip of the draft's pictures above it takes this many rows a picture at most.
 const POLL_MS = 500
 const DRAFT_ROWS = 5
+// A picture drawn this recently is not dropped from memory to make room: two that do not fit together
+// would otherwise push each other out and be read again, without end.
+const DRAWN_MS = 2000
 // A picture an answer names without drawing it: in a link's target, in code, or bare.
 const REFERENCE = /\]\(\s*<?([^)\s>]+\.(?:png|jpe?g|gif|webp))>?[^)]*\)|`([^`\n]+\.(?:png|jpe?g|gif|webp))`|((?:~|\.{1,2})?\/?[\w@%+.-]+(?:\/[\w@%+.-]+)*\.(?:png|jpe?g|gif|webp))(?![\w/])/gi
 const WEB_LINK = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi
@@ -82,7 +85,10 @@ let temp: string | undefined
 let sessionId: string | undefined
 let folder: string | undefined
 let cache: string | undefined
-const loaded = new Budget<Loaded>(LOADED_BUDGET, key => forget(key), key => [...playing.values()].some(play => play.key === key))
+const loaded = new Budget<Loaded>(LOADED_BUDGET, key => forget(key), key => isInUse(key))
+// When each picture was last drawn: one drawn lately stays in memory, over the budget if it must.
+const drawnAt = new Map<string, number>()
+const isInUse = (key: string) => Date.now() - (drawnAt.get(key) ?? -Infinity) < DRAWN_MS || [...playing.values()].some(play => play.key === key)
 const loading = new Set<string>()
 // The pictures that could not be read, by key: not tried again on every redraw.
 const failed = new Set<string>()
@@ -235,6 +241,7 @@ function reset () {
   prefetched.clear()
   sourceFiles.clear()
   openers.clear()
+  drawnAt.clear()
   index = undefined
 }
 
@@ -608,6 +615,7 @@ function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: st
   if (picture && 'error' in picture) return <Text key={key} dimColor>{`${label}: no preview, ${picture.error}`}</Text>
   if (!picture || !frames) return <Text key={key} dimColor>{`${label} loading…`}</Text>
 
+  drawnAt.set(key, Date.now())
   const { columns, rows } = fitCells(picture.width, picture.height, site.maxColumns, site.maxRows)
   const element = `${slot}:${nameOf(key)}`
   const isAnimated = frames.delays.length > 1 && site.animate

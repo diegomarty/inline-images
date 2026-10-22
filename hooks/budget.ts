@@ -1,6 +1,6 @@
 /**
  * What the mod keeps in memory, by key, within a budget of bytes: past it, the least recently used
- * entries go first, those `isPinned` says are in use (a GIF playing) after every other.
+ * entries go first. One `isPinned` says is in use (drawn just now, a GIF playing) never goes.
  *
  * Reading an entry with `get` makes it the most recently used; `has` and `peek` leave the order.
  */
@@ -62,15 +62,16 @@ export class Budget<T> {
     return [...this.entries.keys()]
   }
 
-  /** Drops the least recently used until within the budget: the unpinned first; never `keep`. */
+  /**
+   * Drops the least recently used until within the budget, never `keep` nor an entry `isPinned` says
+   * is in use: the budget may be passed while all that is left is in use.
+   */
   private trim (keep: string) {
-    for (const pass of [false, true]) {
-      for (const key of this.keys()) {
-        if (this.total <= this.limit) return
-        if (key === keep || (!pass && this.isPinned(key))) continue
-        this.delete(key)
-        this.onEvict(key)
-      }
+    for (const key of this.keys()) {
+      if (this.total <= this.limit) return
+      if (key === keep || this.isPinned(key)) continue
+      this.delete(key)
+      this.onEvict(key)
     }
   }
 }

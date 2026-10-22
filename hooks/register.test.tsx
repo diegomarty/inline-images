@@ -465,7 +465,7 @@ test('a card waits for every block above its chip to be measured', async ($, on)
 
 // --- Lighter on the engine, the memory and the disk.
 
-test('the memory budget drops the least recently used, a pinned entry last, never the one just kept', () => {
+test('the memory budget drops the least recently used, never one in use nor the one just kept', () => {
   const dropped: string[] = []
   const budget = new Budget<string>(10, key => dropped.push(key), key => key === 'playing')
   budget.set('playing', 'p', 4)
@@ -474,9 +474,10 @@ test('the memory budget drops the least recently used, a pinned entry last, neve
   budget.set('b', 'b', 4)
   expect(dropped).toEqual(['a'])
   expect(budget.keys()).toEqual(['playing', 'b'])
+  // Past the budget with all that is left in use or just kept: nothing more goes.
   budget.set('c', 'c', 8)
-  expect(dropped).toEqual(['a', 'b', 'playing'])
-  expect([budget.keys(), budget.bytes]).toEqual([['c'], 8])
+  expect(dropped).toEqual(['a', 'b'])
+  expect([budget.keys(), budget.bytes]).toEqual([['playing', 'c'], 12])
 })
 
 test("the session's id is asked once, not on every row drawn", async ($, on) => {
