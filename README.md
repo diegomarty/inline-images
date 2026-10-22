@@ -112,6 +112,8 @@ One hooks module ([`hooks/register.tsx`](hooks/register.tsx)), a GIF decoder ([`
 
 ## Development
 
+To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md): running the mod from a clone, checking a change, commits and pull requests.
+
 ```bash
 claude plugin validate .   # the manifest, the marketplace and the hooks module
 claude plugin test .       # runs hooks/register.test.tsx against the engine
