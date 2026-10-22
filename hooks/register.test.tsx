@@ -56,7 +56,7 @@ const padded = (base64: string, size: number) => {
  */
 function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0 } = {}) {
   const clock = mock.clock(on, { now })
-  const asked = { sessionId: 0 }
+  const asked = { sessionId: 0, promptReads: 0 }
   mock.env(on, env)
   const session = { id: 's-1' }
   // The prompt box: what is typed in it so far. The folders made.
@@ -76,7 +76,10 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   })
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('prompt.read', () => ({ value: { text: box.text, cursor: box.text.length } }))
+  on('prompt.read', () => {
+    asked.promptReads++
+    return { value: { text: box.text, cursor: box.text.length } }
+  })
   on('session.root', () => ({ value: '/project/app' }))
   on('session.cwd', () => ({ value: '/project/app' }))
   on('process.run', ($, e) => {
@@ -630,19 +633,15 @@ test('a picture pasted in the draft shows above the prompt, small, named; one ty
   expect(await band.find({ type: 'Text', text: /Image #9/ })).toBeUndefined()
 })
 
-test('a paste, which raises no edit, reaches the strip within half a second; a picture cleared from the draft leaves it', async ($, on) => {
+test('the draft is read once as the session starts, then followed by its edits and changes, never polled', async ($, on) => {
   const w = world(on, { files: { [FOLDER]: '', [`${FOLDER}/1.png`]: PNG } })
-  await startSession($)
-  const band = await strip($)
-  expect(await band.find({ type: 'Image' })).toBeUndefined()
   w.box.text = '[Image #1]'
-  await w.clock.advance(500)
-  await w.clock.advance(10)
-  expect(await band.find({ type: 'Image' })).toMatchObject({ props: { alt: '[Image #1]' } })
-  w.box.text = ''
-  await w.clock.advance(500)
-  expect(await band.find({ type: 'Image' })).toBeUndefined()
+  await startSession($)
+  await w.clock.advance(60_000)
+  expect(w.asked.promptReads).toBe(1)
+  expect(await (await strip($)).find({ type: 'Image' })).toMatchObject({ props: { alt: '[Image #1]' } })
 })
+
 
 test('with /images off the strip is not drawn', async ($, on) => {
   const w = world(on, { files: { [FOLDER]: '', [`${FOLDER}/1.png`]: PNG } })

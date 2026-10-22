@@ -56,9 +56,7 @@ const MAX_FRAMES = 300
 // The engine writes a pasted image just after the paste puts its placeholder in the box.
 const WAIT_MS = 200
 const WAIT_TRIES = 15
-// Pasting an image puts its `[Image #N]` in the prompt box with no edit event: the box is looked at
-// this often. The strip of the draft's pictures above it takes this many rows a picture at most.
-const POLL_MS = 500
+// The strip of the draft's pictures above the prompt takes this many rows a picture at most.
 const DRAFT_ROWS = 5
 // A pasted picture not found (the engine slow to write it, or an [Image #N] typed before the paste
 // that gets that id) is looked for again once this old.
@@ -886,13 +884,8 @@ export const register: Register = (on, options) => {
     void sweepOld($)
     // A reload keeps what /images set.
     apply(await read($, view))
+    // The draft as it stands; edits and every other change of the box follow from here.
     await track($, (await $.prompt.read()).text)
-    if (e.isInteractive) {
-      // A look that fails (the module unloading under it) waits for the next.
-      $.clock.every(POLL_MS, () => {
-        if (isOn) void $.prompt.read().then(box => track($, box.text)).catch(() => undefined)
-      })
-    }
     await $.command.register({ name: 'images', description: 'Inline Images: turn the pictures on or off, or set their size', argumentHint: 'on | off | small | medium | large', immediate: true })
     return result
   })
@@ -927,11 +920,18 @@ export const register: Register = (on, options) => {
     return result
   })
 
-  // Typing changes the draft: the strip follows it at once.
+  // The strip follows the draft: an edit (a key, a paste), and every other change of the box (a
+  // recalled entry, a submit or a clear, a plugin's fill). Neither waits for it.
   on('prompt.edit', async ($, e, next) => {
     const box = await next(e)
-    if (isOn) await track($, box.text)
+    if (isOn) void track($, box.text).catch(() => undefined)
     return box
+  })
+
+  on('prompt.change', async ($, e, next) => {
+    const result = await next(e)
+    if (isOn) void track($, e.text).catch(() => undefined)
+    return result
   })
 
   // Above the prompt, while you write: the pictures pasted in the draft, side by side, each named,
