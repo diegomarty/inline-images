@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributing guide
+    url: https://github.com/diegomarty/inline-images/blob/main/CONTRIBUTING.md
+    about: How to run the mod from a clone, check a change, and open a pull request.

@@ -1,0 +1,25 @@
+name: Feature request
+description: Something the mod could show, or do better.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you want to do
+      description: The situation, and what gets in the way today.
+      placeholder: When Claude answers with a link to a picture on the web, I have to open it in the browser to see it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: How it would look or work. A sketch or a screenshot of something similar helps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered

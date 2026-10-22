@@ -1,0 +1,113 @@
+name: Bug report
+description: A picture that does not show, shows wrong, or something else that breaks.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Before you do, check that the mod is not loaded twice (installed from the marketplace and also run from a folder), and that you are on the latest version.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+      placeholder: |
+        I asked Claude to read docs/demo.gif. I expected it to play under the Read row, but it showed a blank box.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start `claude` in Ghostty, fullscreen.
+        2. Ask: "read docs/demo.gif".
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot or recording
+      description: Drag it here. For anything you see, this helps more than anything else.
+
+  - type: dropdown
+    id: terminal
+    attributes:
+      label: Terminal
+      options:
+        - Ghostty
+        - kitty
+        - iTerm2
+        - Terminal.app
+        - VS Code
+        - Warp
+        - Other (say which below)
+    validations:
+      required: true
+
+  - type: input
+    id: terminal-version
+    attributes:
+      label: Terminal version
+      placeholder: Ghostty 1.2.3
+
+  - type: checkboxes
+    id: between
+    attributes:
+      label: Between Claude Code and the terminal
+      options:
+        - label: tmux (or another multiplexer)
+        - label: ssh
+
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      description: The output of `claude --version`.
+      placeholder: 2.1.308 (Claude Code)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: fullscreen
+    attributes:
+      label: Fullscreen interface
+      description: '`"tui": "fullscreen"` in your settings, or `/config`.'
+      options:
+        - 'On'
+        - 'Off'
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: mod-version
+    attributes:
+      label: Inline Images version
+      description: From `/plugin`, or the commit if you run it from a clone.
+      placeholder: 0.2.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - WSL
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Lines from the mod
+      description: Any line in the transcript that starts with `inline-images:`, or from the debug log (`claude --debug`).
+      render: text
