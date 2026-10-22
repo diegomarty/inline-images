@@ -76,4 +76,6 @@ claude plugin test .       # runs hooks/register.test.tsx against the engine
 claude --plugin-dir .      # a session with the mod loaded from this folder
 ```
 
+The icon, [`.claude-plugin/icon.png`](.claude-plugin/icon.png), is drawn by [`scripts/make-icon.py`](scripts/make-icon.py): `python3 scripts/make-icon.py .claude-plugin/icon.png` (needs Pillow).
+
 MIT © DiegoMarty. [`hooks/pixels.ts`](hooks/pixels.ts) and [`hooks/chip.tsx`](hooks/chip.tsx) come from [midudev/better-claude](https://github.com/midudev/better-claude), MIT © Miguel Ángel Durán (midudev).
