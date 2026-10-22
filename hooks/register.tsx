@@ -2,8 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, EventOf, ImageSource, Register, RenderElement, Timer } from 'claude-code'
 
 import { Budget } from './budget'
-import { decodeGif, isGif } from './gif'
+import { decodeGif, isGif, shrink } from './gif'
 import { parseBmp, toCells } from './pixels'
+import { decodePng, isPng } from './png'
 import { convert, detect, makeFolder, open as openFile, readBytes, remove, tempFolder, touch, writeBytes, writeFrames } from './system'
 import type { Pixels } from './pixels'
 import type { Hovered, Picture, View } from '../types'
@@ -354,7 +355,22 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: stri
  */
 async function loadStill ($: Engine, key: string, file: string, head: Uint8Array, bytes: number, mtime: number, version: string): Promise<[Picture, Loaded]> {
   const out = `${await cacheFolder($)}/${nameOf(key + version)}`
+  // A PNG drawn in cells or sent as pixels is decoded here, with no converter: on any system, sips
+  // and ImageMagick or not. One that cannot be (too large) goes on to the converter.
   const own = pngSize(head)
+  if (own && isPng(head) && graphics !== 'file') {
+    const decoded = await bytesOf($, file, bytes).then(all => [all, decodePng(all)] as const, () => undefined)
+    if (decoded) {
+      const [all, pixels] = decoded
+      const picture = { width: own.width, height: own.height, frames: 1 }
+      if (graphics === 'none') return [picture, { pixels: [shrink(pixels, CELL_SOURCE_PIXELS, CELL_SOURCE_PIXELS)], delays: [0] }]
+      // Sent as it is where it is small enough; else as pixels, shrunk to what one may send.
+      if (Math.max(own.width, own.height) <= VIEW_PIXELS && bytes <= VIEW_BYTES) return [picture, { sources: [{ png: all.toBase64() }], delays: [0] }]
+      const side = Math.max(1, Math.floor(Math.min(VIEW_PIXELS, Math.sqrt(VIEW_BYTES / 4 / (own.width * own.height)) * Math.max(own.width, own.height))))
+      const small = shrink(pixels, side, side)
+      return [picture, { sources: [{ rgba: small.data.toBase64(), width: small.width, height: small.height }], delays: [0] }]
+    }
+  }
   if (graphics === 'none') {
     const converted = await convert($, file, `${out}.bmp`, 'bmp', CELL_SOURCE_PIXELS)
     const pixels = parseBmp(await bytesOf($, `${out}.bmp`))

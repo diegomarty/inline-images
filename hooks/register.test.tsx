@@ -5,6 +5,7 @@ import type { On } from 'claude-code'
 
 import { Budget } from './budget'
 import { countFrames, decodeGif, shrink } from './gif'
+import { decodePng } from './png'
 
 // A PNG of one red pixel.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
@@ -817,7 +818,46 @@ test("a paste looked for again and again looks through every project's folder on
   expect(w.lists.filter(path => path === root)).toHaveLength(1)
 })
 
-// --- The systems: Windows with PowerShell, WSL with Windows' viewer.
+// --- PNG without a converter, and the systems: Windows with PowerShell, WSL with Windows' viewer.
+
+/** A PNG with stored (uncompressed) deflate blocks, written by hand: colour type, depth, and rows of raw samples. */
+function pngOf (width: number, height: number, colour: number, depth: number, rows: number[][], extra: [string, number[]][] = []) {
+  const chunk = (type: string, body: number[]) => {
+    const length = [24, 16, 8, 0].map(shift => (body.length >>> shift) & 0xff)
+    return [...length, ...Array.from(type, c => c.charCodeAt(0)), ...body, 0, 0, 0, 0]
+  }
+  const raw = rows.flatMap(row => [0, ...row])
+  const stored = [0x78, 0x01, 1, raw.length & 0xff, raw.length >> 8, ~raw.length & 0xff, (~raw.length >> 8) & 0xff, ...raw, 0, 0, 0, 0]
+  const header = [...[24, 16, 8, 0].map(s => (width >>> s) & 0xff), ...[24, 16, 8, 0].map(s => (height >>> s) & 0xff), depth, colour, 0, 0, 0]
+  return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...chunk('IHDR', header), ...extra.flatMap(([type, body]) => chunk(type, body)), ...chunk('IDAT', stored), ...chunk('IEND', [])])
+}
+
+test('a PNG decodes to RGBA: colour, grey, a palette with see-through entries, two bits a pixel', () => {
+  expect([...decodePng(pngOf(2, 1, 2, 8, [[255, 0, 0, 0, 0, 255]])).data]).toEqual([255, 0, 0, 255, 0, 0, 255, 255])
+  expect([...decodePng(pngOf(1, 1, 6, 8, [[1, 2, 3, 128]])).data]).toEqual([1, 2, 3, 128])
+  expect([...decodePng(pngOf(2, 1, 0, 8, [[0, 200]])).data]).toEqual([0, 0, 0, 255, 200, 200, 200, 255])
+  const palette: [string, number[]][] = [['PLTE', [255, 0, 0, 0, 255, 0]], ['tRNS', [0]]]
+  expect([...decodePng(pngOf(2, 1, 3, 8, [[0, 1]], palette)).data]).toEqual([255, 0, 0, 0, 0, 255, 0, 255])
+  // Two bits a pixel, grey: 0b11_01_00_00 is white, then a third of white.
+  expect([...decodePng(pngOf(2, 1, 0, 2, [[0b11010000]])).data]).toEqual([255, 255, 255, 255, 85, 85, 85, 255])
+})
+
+test('a PNG is drawn in cells with no converter at all', async ($, on) => {
+  const w = world(on, { env: { TERM_PROGRAM: 'Apple_Terminal' } })
+  await startSession($)
+  const row = await resultRow($, 'tu-1', image(pngOf(2, 1, 2, 8, [[255, 0, 0, 0, 0, 255]]).toBase64()))
+  expect(await row.find({ type: 'Raster' })).toBeDefined()
+  expect(w.runs.some(run => run.argv[0] === 'sips' || run.argv[0] === 'magick')).toBe(false)
+})
+
+test('a PNG too large to send is sent as pixels, shrunk, with no converter', async ($, on) => {
+  const w = world(on, { env: { TERM: 'xterm-kitty', SSH_CONNECTION: '10.0.0.2 51234 10.0.0.1 22' } })
+  await startSession($)
+  const wide = pngOf(2000, 1, 2, 8, [Array.from({ length: 6000 }, (_, i) => i % 256)])
+  const row = await resultRow($, 'tu-1', image(wide.toBase64()))
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { width: 1024, height: 1 } } })
+  expect(w.runs.some(run => run.argv[0] === 'sips' || run.argv[0] === 'magick')).toBe(false)
+})
 
 test('on Windows the mod runs with PowerShell, not sh, and opens a picture with explorer', async ($, on) => {
   const w = world(on, { env: { OS: 'Windows_NT', TEMP: 'C:/Users/me/AppData/Local/Temp' } })

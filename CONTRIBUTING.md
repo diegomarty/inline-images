@@ -7,7 +7,7 @@ Thanks for helping. Inline Images is a Claude Code mod: a hooks module the engin
 - **Claude Code 2.1.308 or later.** It runs the mod, its validator and its tests.
 - **A terminal that draws pictures**, to see a change as most users will: Ghostty or kitty. Also check one that does not (Terminal.app, or Ghostty inside tmux), where pictures are drawn in cells.
 - **The fullscreen interface** (`"tui": "fullscreen"`) for anything that involves the pointer: chips, hover cards, clicks.
-- **macOS with `sips`**, or ImageMagick elsewhere, to convert pictures that are not PNG or GIF.
+- **A converter for pictures that are not PNG or GIF**: `sips` on macOS and PowerShell on Windows are built in; on Linux, ImageMagick.
 - **Python 3 with Pillow**, only if you change the icon or the README's illustrations.
 
 ## Run the mod from your clone
