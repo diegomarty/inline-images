@@ -59,6 +59,8 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   const asked = { sessionId: 0 }
   mock.env(on, env)
   const session = { id: 's-1' }
+  // The folders made.
+  const made = new Set<string>()
   const mtimes: Record<string, number> = {}
   const runs: { argv: string[]; stdin?: string }[] = []
   const reads: string[] = []
@@ -79,6 +81,11 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     const argv = [...e.argv]
     runs.push({ argv, stdin: e.init?.stdin })
     if (argv[0] === 'id') return ok('501\n')
+    if (argv[0] === 'mkdir') made.add(argv.at(-1)!)
+    if (argv[0] === 'rm') {
+      delete files[argv.at(-1)!]
+      made.delete(argv.at(-1)!)
+    }
     if (argv[0] === 'uname') return ok('Darwin\n')
     if (argv[0] === 'git') return ok(tracked.join('\0'))
     if (argv[0] === 'sips' && argv[1] === '-g') {
@@ -111,6 +118,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   }))
   on('fs.stat', ($, e) => {
     stats.push(e.path)
+    if (made.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } }
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file' as const, size: decoded(files[e.path]!).length, mtimeMs: mtimes[e.path] ?? 0, isLink: false } }
   })
@@ -600,4 +608,29 @@ test('/images off stops the GIFs playing', async ($, on) => {
   await images($, 'off')
   await w.clock.advance(1000)
   expect(w.blits).toHaveLength(1)
+})
+
+// --- The cache folder: never written to once removed.
+
+test('a session that ends for any reason forgets its cache: the next one is made anew', async ($, on) => {
+  const w = world(on)
+  await startSession($)
+  await resultRow($, 'tu-1', image(PNG))
+  const root = '/tmp/claude-501/inline-images'
+  await $.session.end({ reason: 'resume', sessionId: 's-1', resume: { id: 's-1' } })
+  w.session.id = 's-2'
+  await resultRow($, 'tu-2', image(PNG))
+  const made = w.runs.filter(run => run.argv[0] === 'mkdir').map(run => run.argv.at(-1))
+  expect(made).toEqual([`${root}/s-1`, `${root}/s-2`])
+  expect(w.runs.find(run => run.argv[2]?.includes('base64 --decode >') && run.argv[3]!.startsWith(`${root}/s-2/`))).toBeDefined()
+})
+
+test('a file where the cache folder goes (sips writing into a folder removed) is replaced by the folder', async ($, on) => {
+  const root = '/tmp/claude-501/inline-images'
+  const w = world(on, { files: { [`${root}/s-1`]: PNG } })
+  await startSession($)
+  const row = await resultRow($, 'tu-1', image(PNG))
+  const order = w.runs.filter(run => ['rm', 'mkdir'].includes(run.argv[0]!) && run.argv.at(-1) === `${root}/s-1`).map(run => run.argv.slice(0, 2).join(' '))
+  expect(order).toEqual(['rm -f', 'mkdir -p'])
+  expect(await row.find({ type: 'Image' })).toBeDefined()
 })

@@ -157,13 +157,22 @@ async function pastedFile ($: Engine, id: number) {
   return name && /^\d+\.[a-z]+$/.test(name) ? `${found}/images/${name}` : undefined
 }
 
-/** The mod's own folder for this session, made once. */
+/**
+ * The mod's own folder for this session, made where it is missing. Looked at on every use: one
+ * removed under the session must not be written to, as sips, told to write into a folder that is
+ * not there, writes a file at the folder's path, says nothing, and every write after it fails.
+ */
 async function cacheFolder ($: Engine) {
-  if (cache) return cache
   await follow($)
-  const path = `${(temp ??= await tempFolder($))}/inline-images/${sessionId}`
+  const path = cache ?? `${(temp ??= await tempFolder($))}/inline-images/${sessionId}`
+  const kind = await $.fs.stat(path).then(stat => stat.kind, () => undefined)
+  if (kind === 'dir') return (cache = path)
   if (isWindows) await $.process.run(['powershell', '-NoProfile', '-Command', 'New-Item -ItemType Directory -Force -Path $env:INLINE_IMAGES_DIR | Out-Null'], { env: { INLINE_IMAGES_DIR: path } })
-  else await $.process.run(['mkdir', '-p', path])
+  else {
+    // A file where the folder goes: one such a write left. It goes, and the folder is made.
+    if (kind !== undefined) await $.process.run(['rm', '-f', path])
+    await $.process.run(['mkdir', '-p', path])
+  }
   return (cache = path)
 }
 
@@ -839,16 +848,15 @@ export const register: Register = (on, options) => {
     return { text: describe(next) }
   })
 
-  // A session that ends takes its cache with it. After a /clear the process goes on under a new
-  // session, with no session.start: everything read is forgotten here.
+  // A session that ends takes its cache with it, and everything read is forgotten: after a /clear,
+  // a resume or any other end the process may go on under another session, with no session.start,
+  // and must not keep using the cache just removed.
   on('session.end', async ($, e, next) => {
     const result = await next(e)
     await sweep($, 'this')
-    if (e.reason === 'clear') {
-      reset()
-      await update($, pictures, () => ({}))
-      await update($, hovered, () => null)
-    }
+    reset()
+    await update($, pictures, () => ({}))
+    await update($, hovered, () => null)
     return result
   })
 
