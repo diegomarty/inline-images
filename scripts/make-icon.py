@@ -1,17 +1,16 @@
 """Draws the Inline Images icon.
 
-A fan of three photos (the frames of a GIF) over a night-violet ground. The front one is a
-synthwave sunset that, on its left, is drawn as a terminal draws a picture in text: tall cells, each
-split in two colors by a half block; a glowing seam runs where the cells give way to the picture
-itself. Under the photos, a prompt bar of glass: the chevron, the chip the mod draws for a picture,
-the cursor.
+A terminal window holding a Claude Code transcript: a `● Read(sunset.gif)` row, under its `⎿` the
+orange chip the mod draws for a picture, and the picture: a synthwave sunset that, on its left, is
+drawn as a terminal draws a picture in text (tall cells, each split in two colors by a half block),
+a glowing seam where the cells give way to the picture itself. At the foot, the prompt box.
 
     python3 scripts/make-icon.py .claude-plugin/icon.png   (needs Pillow)
 """
 import math
 import random
 import sys
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 OUT = sys.argv[1]
 S = 2048  # drawn at twice the size, then shrunk: smooth edges
@@ -21,6 +20,9 @@ random.seed(7)
 INK = (250, 246, 255)
 ORANGE = (255, 150, 90)
 PINK = (255, 90, 170)
+GREEN = (98, 210, 130)
+MUTED = (150, 132, 180)
+WINDOW = (22, 15, 40)
 
 
 def lerp(a, b, t):
@@ -163,59 +165,116 @@ def place(base, card, center, angle):
 
 
 ROUND = 450
+
+
+def mono(size):
+    """A monospaced font: Menlo on macOS, DejaVu Sans Mono elsewhere; Pillow's own past both."""
+    for path in ['/System/Library/Fonts/Menlo.ttc', '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf']:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            pass
+    return ImageFont.load_default(size)
+
+
 icon = Image.new('RGBA', (S, S), (0, 0, 0, 0))
 
-# The ground: night violet, a warm glow behind the photos, a vignette at the corners, a little grain.
+# The ground: night violet, a warm glow behind the window, a little grain, a rim of light on top.
 ground = gradient((S, S), [(0, (46, 26, 96)), (0.55, (25, 16, 56)), (1, (12, 9, 28))]).convert('RGBA')
-ground = Image.alpha_composite(ground, glow((S, S), (S * 0.50, S * 0.45), S * 0.44, (255, 90, 150), 115))
-ground = Image.alpha_composite(ground, glow((S, S), (S * 0.62, S * 0.34), S * 0.22, (255, 170, 90), 80))
+ground = Image.alpha_composite(ground, glow((S, S), (S * 0.50, S * 0.46), S * 0.46, (255, 90, 150), 105))
+ground = Image.alpha_composite(ground, glow((S, S), (S * 0.62, S * 0.36), S * 0.22, (255, 170, 90), 70))
 grain = Image.effect_noise((S, S), 22).convert('L').point(lambda v: max(0, v - 118))
 ground = Image.alpha_composite(ground, Image.merge('RGBA', (grain, grain, grain, grain.point(lambda v: v // 3))))
-# A rim of light along the square's top edge.
 rim = Image.new('RGBA', (S, S), (0, 0, 0, 0))
 ImageDraw.Draw(rim).rounded_rectangle((6, 6, S - 7, S - 7), ROUND - 6, outline=(255, 210, 240, 70), width=6)
-rim_fade = gradient((S, S), [(0, (255, 255, 255)), (0.35, (0, 0, 0)), (1, (0, 0, 0))]).convert('L')
-rim.putalpha(ImageChops.multiply(rim.split()[3], rim_fade))
+rim.putalpha(ImageChops.multiply(rim.split()[3], gradient((S, S), [(0, (255, 255, 255)), (0.35, (0, 0, 0)), (1, (0, 0, 0))]).convert('L')))
 ground = Image.alpha_composite(ground, rim)
 icon.paste(ground, (0, 0), rounded_mask((S, S), ROUND))
 
-# Three photos fanned out: the frames of a GIF, the sun lower in each.
-pw, ph = int(S * 0.62), int(S * 0.45)
-canvas = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-canvas = place(canvas, photo(pw, ph, 0.16, False), (S * 0.425, S * 0.395), 12)
-canvas = place(canvas, photo(pw, ph, 0.08, False), (S * 0.455, S * 0.42), 5.5)
-canvas = place(canvas, photo(pw, ph, 0.0, True), (S * 0.50, S * 0.45), -3.5)
-clip = rounded_mask((S, S), ROUND)
-icon = Image.alpha_composite(icon, Image.composite(canvas, Image.new('RGBA', (S, S), (0, 0, 0, 0)), clip))
-
-# The prompt bar: glass, its chevron, the chip of a picture, the cursor.
-bh = int(S * 0.13)
-bw = int(bh * 3.85)
-bar = (int(S * 0.5 - bw / 2), int(S * 0.76), int(S * 0.5 + bw / 2), int(S * 0.76) + bh)
-blurred = icon.crop(bar).filter(ImageFilter.GaussianBlur(30))
-glass = Image.alpha_composite(blurred, Image.new('RGBA', blurred.size, (255, 255, 255, 26)))
-icon.paste(glass, bar[:2], rounded_mask(glass.size, bh // 2))
+# The terminal window: dark, a shadow under it, a thin title bar.
+win = (int(S * 0.095), int(S * 0.115), int(S * 0.905), int(S * 0.885))
+shadow = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+ImageDraw.Draw(shadow).rounded_rectangle((win[0], win[1] + 50, win[2], win[3] + 50), 130, fill=(6, 3, 16, 190))
+icon = Image.alpha_composite(icon, shadow.filter(ImageFilter.GaussianBlur(55)))
+body = gradient((win[2] - win[0], win[3] - win[1]), [(0, (30, 20, 54)), (1, WINDOW)]).convert('RGBA')
+icon.paste(body, win[:2], rounded_mask(body.size, 130))
 d = ImageDraw.Draw(icon)
-d.rounded_rectangle(bar, bh // 2, outline=(255, 235, 250, 70), width=5)
-cy = (bar[1] + bar[3]) / 2
-px = bar[0] + bh * 0.50
-k = bh * 0.20
+d.rounded_rectangle(win, 130, outline=(120, 96, 168), width=6)
+for i in range(3):
+    cx, cy, r = win[0] + 110 + i * 66, win[1] + 80, 18
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(84, 66, 120))
+
+# The transcript: the Read call's row, as Claude Code draws it.
+font = mono(int(S * 0.040))
+tx, ty = win[0] + 100, win[1] + 165
+d.text((tx, ty), '●', font=font, fill=GREEN, anchor='lm')
+step = d.textlength('● ', font=font)
+d.text((tx + step, ty), 'Read', font=font, fill=INK, anchor='lm')
+d.text((tx + step + d.textlength('Read', font=font), ty), '(sunset.gif)', font=font, fill=MUTED, anchor='lm')
+
+
+def chip(d, x, cy, h):
+    """The chip the mod draws for a picture an answer names: orange, a small picture and a name in
+    it. `x` its left edge, `cy` its middle, `h` its height; answers its right edge."""
+    w = h * 3.1
+    d.rounded_rectangle((x, cy - h / 2, x + w, cy + h / 2), h * 0.22, fill=ORANGE)
+    ink = (54, 22, 70)
+    gx0, gy0 = x + h * 0.30, cy - h * 0.29
+    gx1, gy1 = gx0 + h * 0.80, cy + h * 0.29
+    d.rounded_rectangle((gx0, gy0, gx1, gy1), h * 0.08, outline=ink, width=int(h * 0.09))
+    d.polygon([(gx0 + h * 0.08, gy1 - h * 0.08), (gx0 + h * 0.30, gy0 + h * 0.22), (gx0 + h * 0.48, gy1 - h * 0.13),
+               (gx0 + h * 0.58, gy0 + h * 0.33), (gx1 - h * 0.06, gy1 - h * 0.08)], fill=ink)
+    for i, length in enumerate([1.25, 0.85]):
+        yy = cy - h * 0.14 + i * h * 0.28
+        d.rounded_rectangle((gx1 + h * 0.24, yy - h * 0.07, gx1 + h * 0.24 + h * length, yy + h * 0.07), h * 0.07, fill=ink)
+    return x + w
+
+
+# Under the row, after its ⎿, the chip the mod draws for the picture: what the icon is about.
+chip_h = S * 0.072
+chip_cy = ty + S * 0.085
+hook_x = tx + step * 0.55
+d.line([(hook_x, ty + S * 0.03), (hook_x, chip_cy), (hook_x + S * 0.03, chip_cy)], fill=MUTED, width=7)
+chip(d, hook_x + S * 0.045, chip_cy, chip_h)
+
+# The picture: one photo, the sunset that turns from cells into itself, centered across the window
+# and down the room between the chip and the prompt box, as large as that room holds (up to PHOTO
+# of the square), so it stands as far from one as from the other.
+PHOTO = 0.60
+GAP = S * 0.04  # the same above and below the photo
+box_top = int(win[3] - S * 0.125)
+area = (chip_cy + chip_h / 2 + GAP, box_top - GAP)
+ANGLE = 0
+
+
+def extent(card, angle):
+    a = math.radians(angle)
+    return (card.width * abs(math.cos(a)) + card.height * abs(math.sin(a)), card.width * abs(math.sin(a)) + card.height * abs(math.cos(a)))
+
+
+pw = int(S * PHOTO)
+while True:
+    card = photo(pw, int(pw * 0.72), 0.0, True)
+    rw, rh = extent(card, ANGLE)
+    if rh <= area[1] - area[0] and rw <= (win[2] - win[0]) - S * 0.14:
+        break
+    pw -= int(S * 0.01)
+canvas = place(Image.new('RGBA', (S, S), (0, 0, 0, 0)), card, (S / 2, (area[0] + area[1]) / 2), ANGLE)
+icon = Image.alpha_composite(icon, Image.composite(canvas, Image.new('RGBA', (S, S), (0, 0, 0, 0)), rounded_mask((S, S), ROUND)))
+
+# The prompt box, as Claude Code draws it: rounded, its chevron, the cursor.
+d = ImageDraw.Draw(icon)
+box = (win[0] + 70, box_top, win[2] - 70, win[3] - 70)
+bh = box[3] - box[1]
+d.rounded_rectangle(box, 34, fill=(30, 20, 52), outline=(150, 120, 190), width=6)
+cy = (box[1] + box[3]) / 2
+px = box[0] + bh * 0.45
+k = bh * 0.18
 d.line([(px, cy - k), (px + k * 1.1, cy), (px, cy + k)], fill=ORANGE, width=int(bh * 0.10), joint='curve')
 for x, y in [(px, cy - k), (px + k * 1.1, cy), (px, cy + k)]:
     rr = bh * 0.05
     d.ellipse((x - rr, y - rr, x + rr, y + rr), fill=ORANGE)
-# The chip: orange, a small picture in it, as the mod draws the one the pointer is on.
-chip = (px + bh * 0.62, cy - bh * 0.25, px + bh * 0.62 + bh * 1.55, cy + bh * 0.25)
-d.rounded_rectangle(chip, bh * 0.12, fill=ORANGE)
-gx0, gy0 = chip[0] + bh * 0.16, chip[1] + bh * 0.11
-gx1, gy1 = gx0 + bh * 0.40, chip[3] - bh * 0.11
-d.rounded_rectangle((gx0, gy0, gx1, gy1), bh * 0.04, outline=(54, 22, 70), width=int(bh * 0.045))
-d.polygon([(gx0 + bh * 0.04, gy1 - bh * 0.04), (gx0 + bh * 0.15, gy0 + bh * 0.12), (gx0 + bh * 0.24, gy1 - bh * 0.06), (gx0 + bh * 0.29, gy0 + bh * 0.17), (gx1 - bh * 0.03, gy1 - bh * 0.04)], fill=(54, 22, 70))
-for i, length in enumerate([0.62, 0.42]):
-    ty = cy - bh * 0.07 + i * bh * 0.14
-    d.rounded_rectangle((gx1 + bh * 0.12, ty - bh * 0.035, gx1 + bh * 0.12 + bh * length, ty + bh * 0.035), bh * 0.035, fill=(54, 22, 70))
-# The cursor.
-cx = chip[2] + bh * 0.28
-d.rounded_rectangle((cx, cy - bh * 0.27, cx + bh * 0.22, cy + bh * 0.27), bh * 0.04, fill=INK)
+cx = px + bh * 0.62
+d.rectangle((cx, cy - bh * 0.26, cx + bh * 0.20, cy + bh * 0.26), fill=INK)
 
 icon.resize((FINAL, FINAL), Image.LANCZOS).save(OUT, optimize=True)
