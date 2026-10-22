@@ -704,3 +704,10 @@ test("a session's own cache is never swept as gone, and is touched while the ses
   await w.clock.advance(6 * 60 * 60 * 1000)
   expect(w.runs.some(run => run.argv[0] === 'touch' && run.argv[1] === `${root}/s-1`)).toBe(true)
 })
+
+test('a stray backtick blanks no picture past its paragraph', async ($, on) => {
+  world(on, { files: { '/project/app/out/chart.png': PNG } })
+  await startSession($)
+  const row = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'AssistantMessage', requestId: 'a-1', props: { text: 'Type a ` to quote.\n\n![chart](out/chart.png)\n\nThen run `make`.', isFirstOfReply: true }, viewport: { ...SCREEN, isFullscreen: false } })
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { alt: 'chart.png' } })
+})

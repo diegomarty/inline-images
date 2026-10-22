@@ -765,9 +765,12 @@ function imageIndex ($: Engine, cwd: string, now: number) {
  */
 function withoutCode (text: string) {
   const blank = (code: string) => code.replace(/[^\n]/g, ' ')
+  // A code span ends within its paragraph: a stray backtick blanks nothing past a blank line.
   return text
     .replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1[^\n]*$|(?![\s\S]))/gm, blank)
-    .replace(/(`+)[^`\n][\s\S]*?\1/g, blank)
+    .split(/(\n[ \t]*\n)/)
+    .map(paragraph => paragraph.replace(/(`+)[^`\n][\s\S]*?\1/g, blank))
+    .join('')
 }
 
 /** The pictures an answer embeds (`![alt](path)`, outside code), each with where it is in the text. */
