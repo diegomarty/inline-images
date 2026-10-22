@@ -64,6 +64,9 @@ const PASTE_RETRY_MS = 10000
 // A picture drawn this recently is not dropped from memory to make room: two that do not fit together
 // would otherwise push each other out and be read again, without end.
 const DRAWN_MS = 2000
+// While a session runs its cache folder is touched this often, so another session's sweep of caches
+// gone a week never takes it.
+const TOUCH_MS = 6 * 60 * 60 * 1000
 // A picture an answer names without drawing it: in a link's target, in code, or bare.
 const REFERENCE = /\]\(\s*<?([^)\s>]+\.(?:png|jpe?g|gif|webp))>?[^)]*\)|`([^`\n]+\.(?:png|jpe?g|gif|webp))`|((?:~|\.{1,2})?\/?[\w@%+.-]+(?:\/[\w@%+.-]+)*\.(?:png|jpe?g|gif|webp))(?![\w/])/gi
 const WEB_LINK = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi
@@ -95,6 +98,8 @@ const loading = new Set<string>()
 const failed = new Map<string, number>()
 // Which session the mod reads for: a load started in an earlier one keeps nothing it read.
 let epoch = 0
+// The timer that keeps this session's cache marked as in use.
+let touchTimer: Timer | undefined
 // Each picture read from a file (or looked for there): the file, its mtime then (-1: not there),
 // and when that was last looked at.
 const checked = new Map<string, { file: string; mtime: number; at: number }>()
@@ -273,16 +278,25 @@ async function sweepEnded ($: Engine, id: string) {
   await $.process.run(['rm', '-rf', `${(temp ??= await tempFolder($))}/inline-images/${id}`]).catch(() => undefined)
 }
 
-/** Removes, as a session starts, the caches of sessions gone a week. */
+/**
+ * Removes, as a session starts, the caches of sessions gone a week: by their folder's mtime, which a
+ * running session keeps fresh (touchCache), and never this session's own.
+ */
 async function sweepOld ($: Engine) {
   if (isWindows) return
   const root = `${(temp ??= await tempFolder($))}/inline-images`
   const now = await $.clock.now()
+  const own = await follow($)
   for (const entry of await $.fs.list(root).catch(() => [])) {
-    if (entry.kind === 'dir' && /^[\w-]+$/.test(entry.name) && now - entry.mtimeMs > CACHE_DAYS * 24 * 60 * 60 * 1000) {
+    if (entry.kind === 'dir' && entry.name !== own && /^[\w-]+$/.test(entry.name) && now - entry.mtimeMs > CACHE_DAYS * 24 * 60 * 60 * 1000) {
       await $.process.run(['rm', '-rf', `${root}/${entry.name}`]).catch(() => undefined)
     }
   }
+}
+
+/** Marks this session's cache as in use: a running session's is never taken for one gone. */
+async function touchCache ($: Engine) {
+  if (cache && !isWindows) await $.process.run(['touch', cache]).catch(() => undefined)
 }
 
 /** Notes a transcript row the first time it is drawn. */
@@ -882,6 +896,8 @@ export const register: Register = (on, options) => {
     await update($, pictures, () => ({}))
     await update($, hovered, () => null)
     void sweepOld($)
+    touchTimer?.cancel()
+    touchTimer = $.clock.every(TOUCH_MS, () => void touchCache($))
     // A reload keeps what /images set.
     apply(await read($, view))
     // The draft as it stands; edits and every other change of the box follow from here.

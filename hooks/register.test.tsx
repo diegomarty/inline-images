@@ -692,3 +692,15 @@ test('a pasted picture not found is looked for again once the last look is old',
   await w.clock.advance(10)
   expect(await band.find({ type: 'Image' })).toMatchObject({ props: { alt: '[Image #2]' } })
 })
+
+test("a session's own cache is never swept as gone, and is touched while the session runs", async ($, on) => {
+  const day = 24 * 60 * 60 * 1000
+  const root = '/tmp/claude-501/inline-images'
+  const w = world(on, { now: 30 * day, dirs: { [`${root}/s-1`]: 1 * day, [`${root}/old`]: 1 * day } })
+  await startSession($)
+  await w.clock.advance(10)
+  expect(w.runs.filter(run => run.argv[0] === 'rm').map(run => run.argv.at(-1))).toEqual([`${root}/old`])
+  await resultRow($, 'tu-1', image(PNG))
+  await w.clock.advance(6 * 60 * 60 * 1000)
+  expect(w.runs.some(run => run.argv[0] === 'touch' && run.argv[1] === `${root}/s-1`)).toBe(true)
+})
