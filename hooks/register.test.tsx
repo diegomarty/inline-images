@@ -760,3 +760,16 @@ test('a sent prompt shares the width among the pictures it draws, not one typed 
   const row = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'UserMessage', requestId: 'm-2', props: { text: '[Image #1] [Image #7]', origin: { kind: 'composer' }, isExpanded: false }, viewport: SCREEN })
   expect(await row.find({ type: 'Image' })).toMatchObject({ props: { columns: 116 } })
 })
+
+// --- Lighter still: a streaming answer, a paste looked for long.
+
+test('an answer streaming in keeps one lookup a block, its chips those of the text as it stands', async ($, on) => {
+  world(on, { files: { '/project/app/a.png': PNG, '/project/app/b.png': PNG } })
+  await startSession($)
+  const props = (text: string) => ({ text, isFirstOfReply: true, onScreen: { first: 0, last: 9, of: 10 } })
+  const row = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'AssistantMessage', requestId: 'a-1', props: props('Saved as a.png'), viewport: SCREEN })
+  expect(await row.find({ key: 'ref:0' })).toMatchObject({ props: { props: { label: 'a.png' } } })
+  // The same block, as more of it streams in: the chip follows the text, not an earlier lookup.
+  await row.redraw(props('Saved as b.png, not a.'))
+  expect(await row.find({ key: 'ref:0' })).toMatchObject({ props: { props: { label: 'b.png' } } })
+})

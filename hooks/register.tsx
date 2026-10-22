@@ -114,9 +114,12 @@ const prefetched = new Set<string>()
 // the picture under each picture's click region, by `<requestId>/<region key>`.
 const sourceFiles = new Map<string, string>()
 const openers = new Map<string, string>()
-// The pictures each block of an answer names, by its text, and whether every name was found; the
-// image files under the working folder; each with when it was looked up.
-const references = new Map<string, { at: number; found: Promise<{ files: string[]; isComplete: boolean }> }>()
+// The pictures each block of an answer names, by the answer and the block: its text then, whether
+// every name was found, and when it was looked up. One entry a block, replaced as an answer streams
+// in, so the partial texts do not pile up; at most MAX_KNOWN of them, the oldest going first.
+const references = new Map<string, { text: string; at: number; found: Promise<{ files: string[]; isComplete: boolean }> }>()
+const MAX_KNOWN = 1000
+// The image files under the working folder, and when they were listed.
 let index: { at: number; files: Promise<string[]> } | undefined
 // The order transcript rows were first drawn in: the newest is the one at the foot of the screen.
 const rowOrder = new Map<string, number>()
@@ -855,12 +858,14 @@ async function referencesIn ($: Engine, text: string, cwd: string, now: number) 
  * The pictures a block of an answer names: looked up once, and again (once old) while a name is
  * still not found, as one Claude writes after it answers.
  */
-async function namedIn ($: Engine, text: string, cwd: string) {
+async function namedIn ($: Engine, where: string, text: string, cwd: string) {
   const now = await $.clock.now()
-  const known = references.get(text)
-  if (known && (now - known.at < RECHECK_MS || (await known.found).isComplete)) return (await known.found).files
+  const known = references.get(where)
+  if (known?.text === text && (now - known.at < RECHECK_MS || (await known.found).isComplete)) return (await known.found).files
   const found = referencesIn($, text, cwd, now)
-  references.set(text, { at: now, found })
+  references.delete(where)
+  references.set(where, { text, at: now, found })
+  if (references.size > MAX_KNOWN) references.delete(references.keys().next().value!)
   return (await found).files
 }
 
@@ -1126,9 +1131,9 @@ export const register: Register = (on, options) => {
 
     const blocks = blocksOf(text)
     const named: string[][] = []
-    for (const block of blocks) {
+    for (const [i, block] of blocks.entries()) {
       const embedded = embeddedIn(block.text).flatMap(target => absolute(target, cwd, home) ?? [])
-      named.push((await namedIn($, block.text, cwd)).filter(file => !embedded.includes(file)))
+      named.push((await namedIn($, `${e.requestId}#${i}`, block.text, cwd)).filter(file => !embedded.includes(file)))
     }
     const hasEmbedded = embeddedIn(text).length > 0
     const hasChips = named.some(files => files.length > 0)
