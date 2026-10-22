@@ -1,4 +1,29 @@
-# Inline Images
+<p align="center">
+  <img src=".claude-plugin/icon.png" alt="Inline Images: a Claude Code terminal showing a picture it read" width="180">
+</p>
+
+<h1 align="center">Inline Images</h1>
+
+<p align="center">
+  <strong>See pictures right in the Claude Code terminal, as the desktop app shows them.</strong><br>
+  What Claude reads, what you paste, what its answers show or name. GIFs play.
+</p>
+
+<p align="center">
+  <a href="https://github.com/diegomarty/inline-images/actions/workflows/ci.yml"><img src="https://github.com/diegomarty/inline-images/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/diegomarty/inline-images/actions/workflows/latest-claude-code.yml"><img src="https://github.com/diegomarty/inline-images/actions/workflows/latest-claude-code.yml/badge.svg" alt="Latest Claude Code"></a>
+  <img src="https://img.shields.io/badge/Claude%20Code-2.1.308%2B-ff965a" alt="Claude Code 2.1.308 or later">
+  <img src="https://img.shields.io/badge/type-mod-c43a8c" alt="A Claude Code mod">
+  <img src="https://img.shields.io/badge/pixels-Ghostty%20%C2%B7%20kitty-6a3d9a" alt="Pixels in Ghostty and kitty">
+  <img src="https://img.shields.io/badge/cells-any%20true--color%20terminal-4a2a78" alt="Cells in any true-color terminal">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f2346" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <code>/plugin marketplace add diegomarty/inline-images</code> · <code>/plugin install inline-images@inline-images</code>
+</p>
+
+---
 
 A Claude Code mod: see pictures in the transcript, as the desktop app shows them. The images Claude reads, the ones you paste and the ones its answers embed are drawn under their rows; the ones an answer only names get a chip that shows the picture under the pointer; GIFs play.
 
