@@ -511,3 +511,47 @@ test("a chip's picture is read before the pointer comes onto it", async ($, on) 
   await w.clock.advance(10)
   expect(w.runs.some(run => run.argv[2]?.startsWith('head -c') && run.argv[3] === '/project/app/shot.png')).toBe(true)
 })
+
+// --- Pictures in the unfolded view, and a click on one.
+
+test('an unfolded group of reads (--verbose, ctrl+o) shows its pictures under its rows, named', async ($, on) => {
+  world(on, { files: { '/project/app/a.png': PNG, '/project/app/b.png': PNG } })
+  await startSession($)
+  const call = (id: string, path: string) => ({ tool_use_id: id, tool: 'Read', input: { file_path: path }, isRunning: false, isErrored: false, isInterrupted: false, output: image(PNG) })
+  const group = (isExpanded: boolean, requestId: string) => $.ui.mount({
+    plugin: 'inline-images',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    requestId,
+    props: { calls: [call('tu-1', '/project/app/a.png'), call('tu-2', '/project/app/b.png')], isActive: false, isExpanded },
+    viewport: SCREEN
+  })
+  await group(true, 'g-0')
+  const row = await group(true, 'g-1')
+  expect(await row.find({ key: 'engine' })).toBeDefined()
+  expect((await row.findAll({ type: 'Image' })).map(image => image.props.alt)).toEqual(['a.png', 'b.png'])
+  expect(await row.find({ type: 'Text', text: 'a.png' })).toBeDefined()
+})
+
+test('a click on a picture drawn opens it in the system viewer: the file read, or the copy of the bytes Claude was sent', async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const click = async (row: Awaited<ReturnType<typeof resultRow>>) => {
+    const region = (await row.findAll({ type: 'Client' })).find(client => String(client.key).startsWith('open:'))!
+    await row.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: String(region.key) })
+    await row.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: String(region.key) })
+  }
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  await click(await resultRow($, 'tu-1', image(PNG)))
+  expect(w.runs.filter(run => run.argv[0] === 'open').map(run => run.argv[1])).toEqual(['/project/app/shot.png'])
+  await click(await resultRow($, 'tu-2', image(PNG)))
+  expect(w.runs.filter(run => run.argv[0] === 'open').map(run => run.argv[1])[1]).toMatch(/\/inline-images\/s-1\/read-[0-9a-f]+\.source\.png$/)
+})
+
+test('off fullscreen there is no pointer: a picture takes no click region', async ($, on) => {
+  world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const row = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'ToolResult', requestId: 'tu-1', props: { tool_use_id: 'tu-1', tool: 'Read', output: image(PNG), isErrored: false }, viewport: { ...SCREEN, isFullscreen: false } })
+  expect(await row.find({ type: 'Image' })).toBeDefined()
+  expect(await row.findAll({ type: 'Client' })).toHaveLength(0)
+})

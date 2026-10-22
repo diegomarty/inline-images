@@ -7,12 +7,15 @@
 export class Budget<T> {
   private readonly entries = new Map<string, { value: T; weight: number }>()
   private total = 0
+  private readonly limit: number
+  private readonly onEvict: (key: string) => void
+  private readonly isPinned: (key: string) => boolean
 
-  constructor (
-    private readonly limit: number,
-    private readonly onEvict: (key: string) => void = () => {},
-    private readonly isPinned: (key: string) => boolean = () => false
-  ) {}
+  constructor (limit: number, onEvict: (key: string) => void = () => {}, isPinned: (key: string) => boolean = () => false) {
+    this.limit = limit
+    this.onEvict = onEvict
+    this.isPinned = isPinned
+  }
 
   /** The bytes held. */
   get bytes () {

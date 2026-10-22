@@ -86,6 +86,10 @@ const checked = new Map<string, { file: string; mtime: number; at: number }>()
 const cells = new Budget<string>(CELLS_BUDGET)
 // The files of the chips already read, or let be, before the pointer came onto one.
 const prefetched = new Set<string>()
+// The file each picture was read from (for one Claude was sent, the copy written of it), by key; and
+// the picture under each picture's click region, by `<requestId>/<region key>`.
+const sourceFiles = new Map<string, string>()
+const openers = new Map<string, string>()
 // The pictures each block of an answer names, by its text, and whether every name was found; the
 // image files under the working folder; each with when it was looked up.
 const references = new Map<string, { at: number; found: Promise<{ files: string[]; isComplete: boolean }> }>()
@@ -185,6 +189,8 @@ function reset () {
   blockRows.clear()
   rowOrder.clear()
   prefetched.clear()
+  sourceFiles.clear()
+  openers.clear()
   index = undefined
 }
 
@@ -394,6 +400,7 @@ async function loadFrom ($: Engine, key: string, origin: Origin, now: number): P
   }
   const version = `@${mtime}`
   const head = await headOf($, file)
+  sourceFiles.set(key, file)
   return isGif(head) ? loadGif($, key, await bytesOf($, file, size), version) : loadStill($, key, file, head, size, mtime, version)
 }
 
@@ -510,7 +517,7 @@ function play ($: Engine, requestId: string, element: string, key: string, colum
   return started.frame
 }
 
-type Site = { ui: Ui; requestId: string; maxColumns: number; maxRows: number; isShown: boolean; animate: boolean }
+type Site = { ui: Ui; requestId: string; maxColumns: number; maxRows: number; isShown: boolean; animate: boolean; canClick: boolean }
 
 // The options: the most rows a picture takes, and whether GIFs play.
 let maxRows = 12
@@ -525,13 +532,15 @@ function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessag
     maxRows,
     // Off screen (`null`) an animation stops; a surface that does not say counts as on screen.
     isShown: e.props.onScreen !== null,
-    animate
+    animate,
+    // The pointer reaches a picture in fullscreen alone.
+    canClick: e.viewport?.isFullscreen !== false
   }
 }
 
 /** One picture, as large as the site allows: the picture itself, or a dim line while it loads or where it cannot be read. */
 function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: string, label: string, slot = 'image'): RenderElement {
-  const { ui: { Image, Raster, Text }, requestId } = site
+  const { ui: { Box, Client, Image, Raster, Text }, requestId } = site
   const picture = all[key]
   const frames = loaded.get(key)
   if (key.startsWith('file:')) void recheck($, key).catch(() => undefined)
@@ -542,9 +551,22 @@ function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: st
   const element = `${slot}:${nameOf(key)}`
   const isAnimated = frames.delays.length > 1 && site.animate
   const frame = isAnimated ? play($, requestId, element, key, columns, rows, site.isShown) : 0
-  return frames.sources
+  const drawn = frames.sources
     ? <Image key={element} source={frames.sources[frame]!} columns={columns} rows={rows} alt={label} />
     : <Raster key={element} columns={columns} rows={rows} cells={cellsOf(key, frame, columns, rows)} />
+  if (!site.canClick) return drawn
+  // Over the picture, an unpainted region of its size: a click on it opens the picture in the
+  // system's viewer.
+  const opener = `open:${element}`
+  openers.set(`${requestId}/${opener}`, key)
+  return (
+    <Box key={`picture:${element}`} width={columns} height={rows} flexShrink={0}>
+      {drawn}
+      <Box position="absolute" top={0} left={0}>
+        <Client key={opener} module="./chip.tsx" width={columns} height={rows} />
+      </Box>
+    </Box>
+  )
 }
 
 /** A text exactly `width` cells wide: cut with an ellipsis, or padded with spaces. */
@@ -815,7 +837,10 @@ export const register: Register = (on, options) => {
   // A run of reads folded into one line: each picture read, named, under the line.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     noteRow(e.requestId)
-    if (e.surface !== 'terminal' || e.props.isExpanded) return next(e)
+    // Folded, the group is one count line; unfolded (--verbose, the ctrl+o transcript outside
+    // fullscreen), a row a call, which draws its result inline with no ToolResult of its own: either
+    // way its pictures are drawn under it, named.
+    if (e.surface !== 'terminal') return next(e)
     const reads = e.props.calls.flatMap(call =>
       call.tool === 'Read' && call.tool_use_id && !call.isErrored && isReadImage(call.output) ? [{ id: call.tool_use_id, output: call.output, path: filePathOf(call.input) }] : [])
     if (reads.length === 0) return next(e)
@@ -828,7 +853,7 @@ export const register: Register = (on, options) => {
       if (path) readPaths.set(id, path)
       const key = loadRead($, id, output)
       const label = path ? baseName(path) : 'image'
-      if (reads.length > 1) drawn.push(<Text key={`label:${id}`} dimColor>{label}</Text>)
+      if (reads.length > 1 || e.props.isExpanded) drawn.push(<Text key={`label:${id}`} dimColor>{label}</Text>)
       drawn.push(pictureOf($, site, all, key, label))
     }
     return withPictures(site.ui, await next(e), RESULT_INDENT, drawn)
@@ -1031,6 +1056,13 @@ export const register: Register = (on, options) => {
       blockRows.set(e.requestId, heights)
       // A card open over this answer moves with the blocks; with none open, nothing draws again.
       if ((await read($, hovered))?.requestId === e.requestId) await update($, hovered, now => (now ? { ...now } : now))
+      return result
+    }
+    // A click on a picture drawn: it opens in the system's viewer.
+    const opened = /^open:/.test(e.element) ? openers.get(`${e.requestId}/${e.element}`) : undefined
+    if (opened !== undefined) {
+      const file = sourceFiles.get(opened)
+      if ((e.data as { isClicked?: unknown } | null)?.isClicked === true && file) void openFile($, file)
       return result
     }
     const path = /^ref:\d+$/.test(e.element) ? chipFiles.get(`${e.requestId}/${e.element}`) : undefined
