@@ -4,6 +4,7 @@ import type { Elements, EngineInterface, EventOf, ImageSource, Register, RenderE
 import { Budget } from './budget'
 import { decodeGif, isGif } from './gif'
 import { parseBmp, toCells } from './pixels'
+import { convert, detect, makeFolder, open as openFile, readBytes, remove, tempFolder, touch, writeBytes, writeFrames } from './system'
 import type { Pixels } from './pixels'
 import type { Hovered, Picture, View } from '../types'
 
@@ -88,7 +89,6 @@ type Loaded = { sources?: ImageSource[]; pixels?: Pixels[]; delays: number[] }
 // How the terminal draws a picture: Ghostty and kitty read a file; one Claude Code was told draws
 // pictures (CLAUDE_CODE_FORCE_TERMINAL_IMAGES) is sent its bytes; any other gets it in colored cells.
 let graphics: 'none' | 'file' | 'bytes' = 'none'
-let isWindows = false
 let temp: string | undefined
 let sessionId: string | undefined
 let folder: string | undefined
@@ -148,19 +148,6 @@ function nameOf (key: string) {
 }
 
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
-
-/**
- * Claude Code's temp folder: `<CLAUDE_CODE_TMPDIR or /tmp>/claude-<uid>`; on Windows
- * `<CLAUDE_CODE_TMPDIR or the system's temp folder>\claude`.
- */
-async function tempFolder ($: Engine) {
-  if (!isWindows) {
-    const base = ((await $.env.get('CLAUDE_CODE_TMPDIR')) || '/tmp').replace(/\/+$/, '')
-    return `${base}/claude-${(await $.process.run(['id', '-u'])).stdout.trim()}`
-  }
-  const system = (await $.env.get('TEMP')) || (await $.env.get('TMP')) || `${(await $.env.get('SystemRoot')) || 'C:\\Windows'}\\temp`
-  return `${((await $.env.get('CLAUDE_CODE_TMPDIR')) || system).replace(/[\\/]+$/, '')}/claude`
-}
 
 /** Where pasted images are stored for this session: `<temp>/<project path, dashed>/<session id>/images`. */
 async function sessionFolder ($: Engine) {
@@ -228,12 +215,9 @@ async function cacheFolder ($: Engine) {
   const path = cache ?? `${(temp ??= await tempFolder($))}/inline-images/${id}`
   const kind = await $.fs.stat(path).then(stat => stat.kind, () => undefined)
   if (kind === 'dir') return (cache = path)
-  if (isWindows) await $.process.run(['powershell', '-NoProfile', '-Command', 'New-Item -ItemType Directory -Force -Path $env:INLINE_IMAGES_DIR | Out-Null'], { env: { INLINE_IMAGES_DIR: path } })
-  else {
-    // A file where the folder goes: one such a write left. It goes, and the folder is made.
-    if (kind !== undefined) await $.process.run(['rm', '-f', path])
-    await $.process.run(['mkdir', '-p', path])
-  }
+  // A file where the folder goes: one such a write left. It goes, and the folder is made.
+  if (kind !== undefined) await remove($, path)
+  await makeFolder($, path)
   return (cache = path)
 }
 
@@ -289,8 +273,8 @@ const keep = (key: string, value: Loaded) => loaded.set(key, value, weightOf(val
 
 /** Removes the cache of a session that ended. */
 async function sweepEnded ($: Engine, id: string) {
-  if (isWindows || !/^[\w-]+$/.test(id)) return
-  await $.process.run(['rm', '-rf', `${(temp ??= await tempFolder($))}/inline-images/${id}`]).catch(() => undefined)
+  if (!/^[\w-]+$/.test(id)) return
+  await remove($, `${(temp ??= await tempFolder($))}/inline-images/${id}`)
 }
 
 /**
@@ -298,20 +282,19 @@ async function sweepEnded ($: Engine, id: string) {
  * running session keeps fresh (touchCache), and never this session's own.
  */
 async function sweepOld ($: Engine) {
-  if (isWindows) return
   const root = `${(temp ??= await tempFolder($))}/inline-images`
   const now = await $.clock.now()
   const own = await follow($)
   for (const entry of await $.fs.list(root).catch(() => [])) {
     if (entry.kind === 'dir' && entry.name !== own && /^[\w-]+$/.test(entry.name) && now - entry.mtimeMs > CACHE_DAYS * 24 * 60 * 60 * 1000) {
-      await $.process.run(['rm', '-rf', `${root}/${entry.name}`]).catch(() => undefined)
+      await remove($, `${root}/${entry.name}`)
     }
   }
 }
 
 /** Marks this session's cache as in use: a running session's is never taken for one gone. */
 async function touchCache ($: Engine) {
-  if (cache && !isWindows) await $.process.run(['touch', cache]).catch(() => undefined)
+  if (cache) await touch($, cache)
 }
 
 /** Notes a transcript row the first time it is drawn. */
@@ -322,57 +305,6 @@ function noteRow (requestId: string) {
 /** Whether a row is the newest drawn: the transcript's last, at the foot of the screen. */
 const isNewest = (requestId: string) => rowOrder.get(requestId) === rowOrder.size - 1
 
-/** Writes base64 bytes to a file: `$.fs` writes text alone. */
-async function writeBytes ($: Engine, path: string, base64: string) {
-  const result = await $.process.run(['sh', '-c', 'base64 --decode > "$0"', path], { stdin: base64 })
-  if (result.exitCode !== 0) throw new Error(`could not write ${baseName(path)}`)
-}
-
-/** Writes each base64 line of `lines` to `<dir>/<i>.rgba`, in one process. */
-async function writeFrames ($: Engine, dir: string, lines: string[]) {
-  const script = 'i=0; while IFS= read -r line; do printf %s "$line" | base64 --decode > "$0/$i.rgba" || exit 1; i=$((i+1)); done'
-  const result = await $.process.run(['sh', '-c', script, dir], { stdin: `${lines.join('\n')}\n` })
-  if (result.exitCode !== 0) throw new Error('could not write the frames')
-}
-
-// The converter that worked here: sips on macOS, ImageMagick elsewhere.
-let tool: 'sips' | 'magick' | 'convert' | undefined
-
-/** A picture's own width and height, as `name` reads them; undefined where it cannot. */
-async function sizeWith ($: Engine, name: 'sips' | 'magick' | 'convert', file: string) {
-  const argv = name === 'sips'
-    ? ['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', file]
-    : [name === 'magick' ? 'magick' : 'identify', ...(name === 'magick' ? ['identify'] : []), '-format', '%w %h', `${file}[0]`]
-  const result = await $.process.run(argv).catch(() => undefined)
-  if (result?.exitCode !== 0) return undefined
-  const [width, height] = name === 'sips'
-    ? [/pixelWidth: (\d+)/.exec(result.stdout)?.[1], /pixelHeight: (\d+)/.exec(result.stdout)?.[1]].map(Number)
-    : result.stdout.trim().split(/\s+/).map(Number)
-  return width && height ? { width, height } : undefined
-}
-
-/**
- * Writes `file` as `format` to `out`, its longest side shrunk to `side` pixels at most, never
- * enlarged (sips's -Z would enlarge a smaller one). Answers the picture's own size.
- */
-async function convert ($: Engine, file: string, out: string, format: 'png' | 'bmp', side: number) {
-  const tools = tool ? [tool] : (['sips', 'magick', 'convert'] as const)
-  for (const name of tools) {
-    const size = await sizeWith($, name, file)
-    if (!size) continue
-    const shrinks = Math.max(size.width, size.height) > side
-    const argv = name === 'sips'
-      ? ['sips', '-s', 'format', format, ...(shrinks ? ['-Z', String(side)] : []), file, '--out', out]
-      : [name, `${file}[0]`, '-resize', `${side}x${side}>`, `${format === 'bmp' ? 'BMP3' : 'PNG'}:${out}`]
-    const result = await $.process.run(argv).catch(() => undefined)
-    if (result?.exitCode === 0) {
-      tool = name
-      return size
-    }
-  }
-  throw new Error('needs sips (macOS) or ImageMagick to read it')
-}
-
 /** A PNG's width and height, from its header. */
 function pngSize (bytes: Uint8Array) {
   if (bytes.length < 24 || bytes[0] !== 0x89 || bytes[1] !== 0x50) return undefined
@@ -382,9 +314,7 @@ function pngSize (bytes: Uint8Array) {
 
 /** A file's first bytes: enough to tell a GIF, and a PNG's size. */
 async function headOf ($: Engine, file: string) {
-  const result = await $.process.run(['sh', '-c', 'head -c 32 "$0" | base64', file])
-  if (result.exitCode !== 0) throw new Error(`could not read ${baseName(file)}`)
-  return Uint8Array.fromBase64(result.stdout.replace(/\s+/g, ''))
+  return readBytes($, file, 0, 32)
 }
 
 /** A whole file's bytes: in one read under 4 MiB, past that in pieces, each through base64. */
@@ -392,11 +322,7 @@ async function bytesOf ($: Engine, file: string, size?: number) {
   size ??= (await $.fs.stat(file)).size
   if (size < READ_LIMIT) return Uint8Array.fromBase64((await $.fs.read(file, { as: 'bytes' })).base64)
   const bytes = new Uint8Array(size)
-  for (let at = 0; at < size; at += PIECE_BYTES) {
-    const result = await $.process.run(['sh', '-c', 'dd if="$0" bs="$1" skip="$2" count=1 2>/dev/null | base64', file, String(PIECE_BYTES), String(at / PIECE_BYTES)])
-    if (result.exitCode !== 0 || result.isStdoutTruncated) throw new Error(`could not read ${baseName(file)}`)
-    bytes.set(Uint8Array.fromBase64(result.stdout.replace(/\s+/g, '')).subarray(0, size - at), at)
-  }
+  for (let at = 0; at < size; at += PIECE_BYTES) bytes.set((await readBytes($, file, at, PIECE_BYTES)).subarray(0, size - at), at)
   return bytes
 }
 
@@ -416,7 +342,7 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: stri
   if (graphics === 'none') return [picture, { pixels: frames, delays }]
   if (graphics === 'bytes') return [picture, { sources: frames.map(frame => ({ rgba: frame.data.toBase64(), width, height })), delays }]
   const dir = `${await cacheFolder($)}/${nameOf(key + version)}`
-  await $.process.run(['mkdir', '-p', dir])
+  await makeFolder($, dir)
   await writeFrames($, dir, frames.map(frame => frame.data.toBase64()))
   return [picture, { sources: frames.map((_, i) => ({ file: `${dir}/${i}.rgba`, format: 'rgba' as const, width, height })), delays }]
 }
@@ -428,22 +354,31 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: stri
  */
 async function loadStill ($: Engine, key: string, file: string, head: Uint8Array, bytes: number, mtime: number, version: string): Promise<[Picture, Loaded]> {
   const out = `${await cacheFolder($)}/${nameOf(key + version)}`
+  const own = pngSize(head)
   if (graphics === 'none') {
-    const own = await convert($, file, `${out}.bmp`, 'bmp', CELL_SOURCE_PIXELS)
+    const converted = await convert($, file, `${out}.bmp`, 'bmp', CELL_SOURCE_PIXELS)
     const pixels = parseBmp(await bytesOf($, `${out}.bmp`))
-    const size = pngSize(head) ?? own
+    const size = own ?? converted
     return [{ width: size.width, height: size.height, frames: 1 }, { pixels: [pixels], delays: [0] }]
   }
   let png = file
-  let own = pngSize(head)
+  let size = own
   const side = graphics === 'bytes' ? VIEW_PIXELS : STILL_PIXELS
   if (!own || Math.max(own.width, own.height) > side || (graphics === 'bytes' && bytes > VIEW_BYTES)) {
-    png = `${out}.png`
-    own = (await convert($, file, png, 'png', side)) ?? own
+    // A PNG too large for the terminal, with no converter here, is drawn as it is: the terminal
+    // shrinks it.
+    const converted = await convert($, file, `${out}.png`, 'png', side).catch(error => {
+      if (own && graphics === 'file') return undefined
+      throw error
+    })
+    if (converted) {
+      png = `${out}.png`
+      size = converted
+    }
   }
   const shown = pngSize(await headOf($, png))
   if (!shown) throw new Error('could not read it')
-  const size = own ?? shown
+  size ??= shown
   const picture = { width: size.width, height: size.height, frames: 1 }
   if (graphics === 'file') return [picture, { sources: [{ file: png, format: 'png', generation: generationOf(mtime) }], delays: [0] }]
   const pngBytes = await bytesOf($, png)
@@ -877,12 +812,6 @@ async function namedIn ($: Engine, where: string, text: string, cwd: string) {
   return (await found).files
 }
 
-/** Opens a picture in the system's viewer. */
-async function openFile ($: Engine, path: string) {
-  const argv = isWindows ? ['explorer', path.replaceAll('/', '\\')] : [(await $.env.get('WSL_DISTRO_NAME')) ? 'xdg-open' : (await $.process.run(['uname', '-s'])).stdout.trim() === 'Darwin' ? 'open' : 'xdg-open', path]
-  await $.process.run(argv).catch(() => undefined)
-}
-
 /** Reads a chip's picture before the pointer comes onto it, a small one only, once. */
 async function prefetch ($: Engine, file: string) {
   if (prefetched.has(file)) return
@@ -932,7 +861,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    isWindows = (await $.env.get('OS')) === 'Windows_NT'
+    await detect($)
     const program = await $.env.get('TERM_PROGRAM')
     const term = await $.env.get('TERM')
     const isNative = program === 'ghostty' || term === 'xterm-ghostty' || term === 'xterm-kitty' || (await $.env.get('KITTY_WINDOW_ID')) !== undefined

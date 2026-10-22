@@ -54,7 +54,7 @@ const padded = (base64: string, size: number) => {
  * processes it runs (head, dd, base64, sips, git) and what the engine draws. Like the engine's,
  * `fs.read` rejects a file of 4 MiB or more, and `fs.stat` one that is not there.
  */
-function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0 } = {}) {
+function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[] } = {}) {
   const clock = mock.clock(on, { now })
   const asked = { sessionId: 0, promptReads: 0 }
   mock.env(on, env)
@@ -69,6 +69,24 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   const stats: string[] = []
   const blits: { requestId: string; key: string; source?: unknown; cells?: string }[] = []
   const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+  // PowerShell, as the mod runs it: told the paths in the environment, known by what its script does.
+  const scripts: string[] = []
+  const powershell = (argv: string[], vars: Record<string, string>, stdin?: string) => {
+    const bytes = decoded(argv.at(-1)!)
+    const script = String.fromCharCode(...Array.from({ length: bytes.length / 2 }, (_, i) => bytes[i * 2]! | (bytes[i * 2 + 1]! << 8)))
+    scripts.push(script)
+    const path = vars.INLINE_IMAGES_PATH!
+    if (script.includes('New-Item')) made.add(path)
+    else if (script.includes('Remove-Item')) delete files[path]
+    else if (script.includes('ReadToEnd')) files[path] = stdin!.trim()
+    else if (script.includes('OpenRead')) return ok(decoded(files[path] ?? '').subarray(Number(vars.INLINE_IMAGES_AT), Number(vars.INLINE_IMAGES_AT) + Number(vars.INLINE_IMAGES_COUNT)).toBase64())
+    else if (script.includes('.Save(')) files[vars.INLINE_IMAGES_OUT!] = vars.INLINE_IMAGES_FORMAT === 'bmp' ? bmp(0xff0000) : PNG
+    else if (script.includes('$image.Width')) {
+      const size = sizes[path] ?? { width: 1, height: 1 }
+      return ok(`${size.width} ${size.height}`)
+    }
+    return ok()
+  }
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.id', () => {
     asked.sessionId++
@@ -85,13 +103,16 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   on('process.run', ($, e) => {
     const argv = [...e.argv]
     runs.push({ argv, stdin: e.init?.stdin })
+    if (missing.includes(argv[0]!)) return { value: { exitCode: 127, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     if (argv[0] === 'id') return ok('501\n')
     if (argv[0] === 'mkdir') made.add(argv.at(-1)!)
     if (argv[0] === 'rm') {
       delete files[argv.at(-1)!]
       made.delete(argv.at(-1)!)
     }
-    if (argv[0] === 'uname') return ok('Darwin\n')
+    if (argv[0] === 'uname') return ok(`${uname}\n`)
+    if (argv[0] === 'wslpath') return ok(`\\\\wsl.localhost\\Ubuntu${argv[2]!.replaceAll('/', '\\')}\n`)
+    if (argv[0] === 'powershell' || argv[0] === 'powershell.exe') return powershell(argv, e.init?.env ?? {}, e.init?.stdin)
     if (argv[0] === 'git') return ok(tracked.join('\0'))
     if (argv[0] === 'sips' && argv[1] === '-g') {
       const size = sizes[argv.at(-1)!] ?? { width: 1, height: 1 }
@@ -103,7 +124,8 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
       return ok()
     }
     if (argv[0] === 'sh' && argv[2]?.includes('base64 --decode >') && e.init?.stdin) files[argv[3]!] = e.init.stdin
-    if (argv[0] === 'sh' && argv[2]?.startsWith('head -c')) return ok(decoded(files[argv[3]!] ?? '').subarray(0, 32).toBase64())
+    // `head -c <count> <file> | base64`: the file's first bytes.
+    if (argv[0] === 'sh' && argv[2]?.startsWith('head -c')) return ok(decoded(files[argv[3]!] ?? '').subarray(0, Number(argv[4])).toBase64())
     if (argv[0] === 'sh' && argv[2]?.startsWith('dd ')) {
       const [file, bs, skip] = [argv[3]!, Number(argv[4]), Number(argv[5])]
       return ok(decoded(files[file]!).subarray(skip * bs, (skip + 1) * bs).toBase64())
@@ -111,14 +133,16 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     return ok()
   })
   on('fs.exists', ($, e) => {
-    exists.push(e.path)
-    return { value: e.path in files }
+    const path = local(e.path)
+    exists.push(path)
+    return { value: path in files }
   })
   const lists: string[] = []
+  const local = (path: string) => path.replace(/^.*?\/(?=[A-Za-z]:\/)/, '')
   const children = (dir: string, paths: string[]) => paths.filter(path => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'))
   on('fs.list', ($, e) => {
-    lists.push(e.path)
-    return listOf(e.path)
+    lists.push(local(e.path))
+    return listOf(local(e.path))
   })
   const listOf = (dir: string) => ({
     value: [
@@ -127,16 +151,18 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     ]
   })
   on('fs.stat', ($, e) => {
-    stats.push(e.path)
-    if (made.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } }
-    if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
-    return { value: { kind: 'file' as const, size: decoded(files[e.path]!).length, mtimeMs: mtimes[e.path] ?? 0, isLink: false } }
+    const path = local(e.path)
+    stats.push(path)
+    if (made.has(path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } }
+    if (!(path in files)) throw new Error(`ENOENT: ${path}`)
+    return { value: { kind: 'file' as const, size: decoded(files[path]!).length, mtimeMs: mtimes[path] ?? 0, isLink: false } }
   })
   on('fs.read', ($, e) => {
-    reads.push(e.path)
-    if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
-    if (decoded(files[e.path]!).length >= FOUR_MIB) throw new Error('over 4 MiB')
-    return { value: { base64: files[e.path]! } }
+    const path = local(e.path)
+    reads.push(path)
+    if (!(path in files)) throw new Error(`ENOENT: ${path}`)
+    if (decoded(files[path]!).length >= FOUR_MIB) throw new Error('over 4 MiB')
+    return { value: { base64: files[path]! } }
   })
   on('ui.blit', ($, e) => {
     blits.push(e as never)
@@ -146,7 +172,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
-  return { clock, runs, reads, exists, stats, lists, blits, files, mtimes, tracked, session, asked, box }
+  return { clock, runs, reads, exists, stats, lists, blits, files, mtimes, tracked, session, asked, box, scripts }
 }
 
 const startSession = ($: Engine) => $.session.start({ cwd: '/project/app', surface: 'terminal', isInteractive: true })
@@ -331,8 +357,8 @@ test('a picture over 4 MiB is drawn: a PNG from its header alone, a GIF read in 
   await readRow($, 'tu-2', '/project/app/big.gif')
   const anim = await resultRow($, 'tu-2', image(gif([0, 1]).toBase64(), 'image/gif', decoded(bigGif).length))
   expect(await anim.find({ type: 'Image' })).toMatchObject({ props: { source: { format: 'rgba', width: 2, height: 1 } } })
-  // Three pieces of 2 MiB, each through dd.
-  expect(w.runs.filter(run => run.argv[2]?.startsWith('dd ') && run.argv[3] === '/project/app/big.gif')).toHaveLength(3)
+  // Three pieces of 2 MiB: the first through head, the rest through dd.
+  expect(w.runs.filter(run => /^(head|dd) /.test(run.argv[2] ?? '') && run.argv[3] === '/project/app/big.gif' && run.argv[4] === String(2 * 1024 * 1024))).toHaveLength(3)
 })
 
 test('a picture that cannot be read is not tried again on every redraw, but is once its file is there', async ($, on) => {
@@ -677,7 +703,7 @@ test('a file where the cache folder goes (sips writing into a folder removed) is
   await startSession($)
   const row = await resultRow($, 'tu-1', image(PNG))
   const order = w.runs.filter(run => ['rm', 'mkdir'].includes(run.argv[0]!) && run.argv.at(-1) === `${root}/s-1`).map(run => run.argv.slice(0, 2).join(' '))
-  expect(order).toEqual(['rm -f', 'mkdir -p'])
+  expect(order).toEqual(['rm -rf', 'mkdir -p'])
   expect(await row.find({ type: 'Image' })).toBeDefined()
 })
 
@@ -789,4 +815,35 @@ test("a paste looked for again and again looks through every project's folder on
   await w.clock.advance(4000)
   // Sixteen looks for the paste over three seconds; the temp folder listed once.
   expect(w.lists.filter(path => path === root)).toHaveLength(1)
+})
+
+// --- The systems: Windows with PowerShell, WSL with Windows' viewer.
+
+test('on Windows the mod runs with PowerShell, not sh, and opens a picture with explorer', async ($, on) => {
+  const w = world(on, { env: { OS: 'Windows_NT', TEMP: 'C:/Users/me/AppData/Local/Temp' } })
+  await startSession($)
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Raster' })).toBeDefined()
+  expect(w.runs.some(run => ['sh', 'mkdir', 'rm', 'touch', 'id'].includes(run.argv[0]!))).toBe(false)
+  expect(w.scripts.some(script => script.includes('New-Item'))).toBe(true)
+  expect(w.scripts.some(script => script.includes('WriteAllBytes'))).toBe(true)
+  const region = (await row.findAll({ type: 'Client' })).find(client => String(client.key).startsWith('open:'))!
+  await row.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: String(region.key) })
+  await row.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: String(region.key) })
+  expect(w.runs.find(run => run.argv[0] === 'explorer')?.argv[1]).toMatch(/^C:\\Users\\me\\AppData\\Local\\Temp\\claude\\inline-images\\s-1\\read-[0-9a-f]+\.source\.png$/)
+})
+
+test("under WSL a picture opens in Windows' viewer, and converts with Windows' PowerShell where ImageMagick is missing", async ($, on) => {
+  const jpeg = Uint8Array.of(0xff, 0xd8, 0xff, 0xe0).toBase64()
+  const w = world(on, { uname: 'Linux', env: { WSL_DISTRO_NAME: 'Ubuntu', TERM_PROGRAM: 'vscode' }, files: { '/home/me/shot.jpg': jpeg }, sizes: { '/home/me/shot.jpg': { width: 64, height: 64 } }, missing: ['magick', 'convert', 'identify'] })
+  await startSession($)
+  await readRow($, 'tu-1', '/home/me/shot.jpg')
+  const row = await resultRow($, 'tu-1', image(jpeg, 'image/jpeg'))
+  expect(await row.find({ type: 'Raster' })).toBeDefined()
+  const converted = w.runs.find(run => run.argv[0] === 'powershell.exe')
+  expect(converted).toBeDefined()
+  const region = (await row.findAll({ type: 'Client' })).find(client => String(client.key).startsWith('open:'))!
+  await row.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: String(region.key) })
+  await row.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: String(region.key) })
+  expect(w.runs.find(run => run.argv[0] === 'explorer.exe')?.argv[1]).toBe('\\\\wsl.localhost\\Ubuntu\\home\\me\\shot.jpg')
 })

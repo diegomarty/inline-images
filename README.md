@@ -41,7 +41,7 @@ A Claude Code mod: see pictures in the transcript, as the desktop app shows them
 </p>
 
 - **GIFs play** while they show on screen, each frame for its own delay; scrolled away, they stop on the frame they were on.
-- **A click on a picture** opens it in the system's viewer (Preview on macOS): the file it was read from, or, for the bytes Claude was sent, the mod's copy of them. Clicks need the fullscreen interface.
+- **A click on a picture** opens it in the system's default viewer (`open` on macOS, `explorer` on Windows and under WSL, `xdg-open` on Linux): the file it was read from, or, for the bytes Claude was sent, the mod's copy of them. Clicks need the fullscreen interface.
 
 ## How it draws
 
@@ -87,7 +87,17 @@ The repository is private for now: adding it needs access to it, and git signed 
 - Images Claude reads are drawn from the file it read, at full quality, while it is still the file Claude read (as large as it was); once it is gone or has changed, from the bytes Claude was sent, which are smaller, so the row shows what Claude saw. A picture an answer embeds or names is looked at again every few seconds: changed, or written after the answer, it is drawn anew.
 - Pictures up to 32 MB: one over 4 MiB is read in pieces (a PNG drawn by the terminal not at all: its header gives its size).
 - A GIF is decoded by the mod itself (no ffmpeg): up to 300 frames, each shrunk to 480 pixels as it is decoded, and all of them to 48 MB together; a longer one is shrunk further. Only one frame is ever held at full size.
-- Other formats are converted with `sips` on macOS and ImageMagick (`magick` or `convert`) elsewhere. Without them, a PNG still shows in Ghostty and kitty and a GIF everywhere; the rest say they need a converter.
+- A GIF is decoded by the mod itself, with no converter. Other pictures are converted, by the first of these the system has:
+
+  | System | Converters, in order |
+  | --- | --- |
+  | macOS | `sips` (built in), ImageMagick |
+  | Linux | ImageMagick (`magick`, or `convert` before version 7) |
+  | Windows | ImageMagick, PowerShell's System.Drawing (built in) |
+  | WSL | ImageMagick, Windows' PowerShell (built in) |
+
+  Where none is there, a PNG still shows in Ghostty and kitty; other pictures say they need a converter.
+- On Windows the mod runs its file work through PowerShell, the paths handed over in the environment; under WSL with Linux's tools, and with Windows' PowerShell and viewer for what Linux there lacks.
 - It reads pasted images from the folder Claude Code stores them in for the session (`<CLAUDE_CODE_TMPDIR or /tmp>/claude-<uid>/…/images`).
 - tmux passes no pictures through: under it, the cells, even in Ghostty and kitty. Over ssh the terminal is on another machine and cannot read this one's files: Ghostty and kitty are sent the picture's bytes instead.
 - Code is left as code: a `![alt](path)` inside a fence or a code span is not drawn.
@@ -107,7 +117,7 @@ One hooks module ([`hooks/register.tsx`](hooks/register.tsx)), a GIF decoder ([`
 - An `AbovePrompt` hook draws the draft's strip from a list of its `[Image #N]`, kept by `prompt.edit` (a key, a paste) and `prompt.change` (every other change of the box: a recalled entry, a submit or a clear, a plugin's fill).
 - `ui.render` hooks on `ToolResult` and `ToolGroup` (Read calls whose output is an image), `UserMessage` (the `[Image #N]` of a sent prompt) and `AssistantMessage` (markdown images, and the pictures an answer names) draw the engine's row, then the pictures or chips under it.
 - Each chip is a `Client` ([`hooks/chip.tsx`](hooks/chip.tsx), as in Image Preview) that posts when the pointer comes onto it, leaves it and clicks it; a `ui.message` hook keeps which chip has the pointer, and the answer draws the card last, `position: "absolute"`, over the rows above the chip's block (or below it, where the rows above are too few), so nothing moves under the pointer and no block paints over it. Where each block is comes from a probe in it ([`hooks/probe.tsx`](hooks/probe.tsx)), an unpainted `Client` as tall as its block, that says how many rows it was laid out in.
-- Each picture is read once, in the background: a GIF is decoded into frames and each written to a raw RGBA file; another picture is drawn from its PNG, or a PNG `sips` or ImageMagick writes. The rows that wait on it draw again.
+- Each picture is read once, in the background: a GIF is decoded into frames ([`hooks/gif.ts`](hooks/gif.ts)) and each written to a raw RGBA file; a PNG is drawn from its file; any other picture from a PNG or BMP a converter writes. What it asks of the system (folders, bytes, conversions, the viewer) goes through [`hooks/system.ts`](hooks/system.ts), a way for each system. The rows that wait on it draw again.
 - A GIF is a keyed `Image` (or `Raster`, in cells); `$.ui.blit` swaps its frame after each delay, with no redraw. A row reported off screen stops its animation.
 
 ## Development
