@@ -922,6 +922,8 @@ export const register: Register = (on, options) => {
     const next: View = size ? { isOn: true, size } : { ...now, isOn: word === '' ? !now.isOn : word === 'on' }
     await update($, view, () => next)
     apply(next)
+    // Off, the chips go with no 'leave' from under a resting pointer: their card goes too.
+    if (!next.isOn) await update($, hovered, () => null)
     $.ui.invalidate('ui.render')
     return { text: describe(next) }
   })

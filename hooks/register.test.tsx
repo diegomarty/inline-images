@@ -711,3 +711,16 @@ test('a stray backtick blanks no picture past its paragraph', async ($, on) => {
   const row = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'AssistantMessage', requestId: 'a-1', props: { text: 'Type a ` to quote.\n\n![chart](out/chart.png)\n\nThen run `make`.', isFirstOfReply: true }, viewport: { ...SCREEN, isFullscreen: false } })
   expect(await row.find({ type: 'Image' })).toMatchObject({ props: { alt: 'chart.png' } })
 })
+
+test('/images off closes a card left open: on again, it does not come back', async ($, on) => {
+  world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const row = await answer($, 'Saved as shot.png.', 'a-1')
+  await row.post({ rows: 1 }, { in: 'probe:0' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  expect(await row.find({ key: 'card' })).toBeDefined()
+  await images($, 'off')
+  await images($, 'on')
+  expect(await (await answer($, 'Saved as shot.png.', 'a-1b')).find({ key: 'card' })).toBeUndefined()
+  expect(await row.find({ key: 'card' })).toBeUndefined()
+})
