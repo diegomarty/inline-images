@@ -60,11 +60,6 @@ const SVG_SIDE = 1200
 // A picture's window: its longest side at most, in points, and how many seconds at most it stays.
 const WINDOW_SIZE = 800
 const WINDOW_LIFE = 120
-// The spinner over a picture whose window is awaited: its frames, how often it turns, and the least
-// a picture takes for it to sit in a box (its border's two rows and its text's one).
-const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-const SPIN_MS = 100
-const SPIN_BOX = { columns: 13, rows: 3 }
 // A PNG drawn in cells past this many pixels is shrunk by a converter where there is one, quicker
 // than decoding it here.
 const DECODE_PIXELS = 1_000_000
@@ -116,7 +111,7 @@ let graphics: 'none' | 'file' | 'bytes' = 'none'
 // pointer.
 let isItermPending = false
 let canWindow = false
-type Opening = { key: string; isOpen: boolean; isShown?: boolean; stream?: ReturnType<Engine['process']['spawn']> }
+type Opening = { key: string; isOpen: boolean; stream?: ReturnType<Engine['process']['spawn']> }
 let shownWindow: Opening | undefined
 let pointerOn: string | undefined
 // The pictures a window could not show: the terminal's cells are theirs.
@@ -336,11 +331,7 @@ async function openWindow ($: Engine, key: string, given?: string) {
     for await (const { text } of opening.stream) {
       isStarted = true
       if (said.length < 2000) said += text
-      if (/^shown$/m.test(text) && !isShown) {
-        isShown = true
-        opening.isShown = true
-        stopWaiting($, key)
-      }
+      if (/^shown$/m.test(text)) isShown = true
       if (!opening.isOpen) break
     }
   } catch (error) {
@@ -348,7 +339,6 @@ async function openWindow ($: Engine, key: string, given?: string) {
   } finally {
     if (shownWindow === opening) shownWindow = undefined
   }
-  stopWaiting($, key)
   if (isShown || !opening.isOpen) return
   const reason = said.replace(/\.\n/g, '').trim().slice(0, 300) || 'the program could not start'
   if (isStarted && !/no display|no tkinter/i.test(said)) {
@@ -358,42 +348,6 @@ async function openWindow ($: Engine, key: string, given?: string) {
   $.ui.log(`inline-images: no window (${reason}); the terminal shows the pictures`, { to: 'debug' })
   canWindow = false
 }
-
-/**
- * The picture whose window is awaited: the pointer came onto it and the window is not up yet. A
- * spinner shows over it (beside a chip) at once, so one knows something comes; a window can take a
- * second or two to start (PowerShell's, above all).
- */
-let waiting: { key: string; spin: number; timer: Timer } | undefined
-
-/** Draws the pictures' rows again: the spinner turns, shows or goes. */
-const redraw = ($: Engine) => update($, pictures, all => ({ ...all })).catch(() => undefined)
-
-function startWaiting ($: Engine, key: string) {
-  if (waiting?.key === key) return
-  waiting?.timer.cancel()
-  const now: NonNullable<typeof waiting> = {
-    key,
-    spin: 0,
-    timer: $.clock.every(SPIN_MS, () => {
-      now.spin++
-      void redraw($)
-    })
-  }
-  waiting = now
-  void redraw($)
-}
-
-/** Stops the spinner over picture `key`: its window is up, will never be, or the pointer left. */
-function stopWaiting ($: Engine, key: string) {
-  if (waiting?.key !== key) return
-  waiting.timer.cancel()
-  waiting = undefined
-  void redraw($)
-}
-
-/** The spinner's glyph now, for picture `key`; none where its window is not awaited. */
-const spinnerOf = (key: string) => (waiting?.key === key ? SPINNER[waiting.spin % SPINNER.length] : undefined)
 
 /** Closes the window, or ends its program before it shows one. */
 function closeWindow () {
@@ -409,12 +363,10 @@ function closeWindow () {
 function pointAt ($: Engine, key: string, isOver: boolean, file?: string) {
   if (isOver) {
     pointerOn = key
-    if (!noWindow.has(key) && !(shownWindow?.key === key && shownWindow.isShown)) startWaiting($, key)
     void openWindow($, key, file)
     return
   }
   if (pointerOn === key) pointerOn = undefined
-  stopWaiting($, key)
   if (shownWindow?.key === key) closeWindow()
 }
 
@@ -838,20 +790,9 @@ function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: st
   // system's viewer.
   const opener = `open:${element}`
   openers.set(`${requestId}/${opener}`, key)
-  // Drawn here, not by the region: the cells a region paints stay blank once it stops.
-  const spinner = spinnerOf(key)
   return (
     <Box key={`picture:${element}`} width={columns} height={rows} flexShrink={0}>
       {drawn}
-      {spinner !== undefined && (columns < SPIN_BOX.columns || rows < SPIN_BOX.rows
-        ? <Box position="absolute" top={0} left={0}><Text color="claude">{spinner}</Text></Box>
-        : (
-          <Box position="absolute" top={0} left={0} width={columns} height={rows} justifyContent="center" alignItems="center">
-            <Box key="spinner" borderStyle="round" borderColor="claude" paddingX={1}>
-              <Text color="claude">{`${spinner} opening`}</Text>
-            </Box>
-          </Box>
-          ))}
       <Box position="absolute" top={0} left={0}>
         <Client key={opener} module="./chip.tsx" width={columns} height={rows} />
       </Box>
@@ -1405,18 +1346,7 @@ export const register: Register = (on, options) => {
               </Box>
               {chips.length > 0 && (
                 <Box flexDirection="column" flexShrink={0}>
-                  {chips.map(({ chip, file }) => {
-                    // Where a chip opens a window, two cells beside it for the spinner: the column
-                    // keeps its width as it turns.
-                    const client = <Client key={chip} module="./chip.tsx" props={{ label: baseName(file) }} />
-                    if (!isWindowing()) return client
-                    return (
-                      <Box key={`row:${chip}`}>
-                        {client}
-                        <Text color="claude">{` ${spinnerOf(`file:${file}`) ?? ' '}`}</Text>
-                      </Box>
-                    )
-                  })}
+                  {chips.map(({ chip, file }) => <Client key={chip} module="./chip.tsx" props={{ label: baseName(file) }} />)}
                 </Box>
               )}
             </Box>
