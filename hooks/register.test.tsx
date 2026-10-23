@@ -898,3 +898,18 @@ test('in cells a picture takes half the rows', async ($, on) => {
   const row = await resultRow($, 'tu-1', image(square.toBase64()))
   expect(await row.find({ type: 'Raster' })).toMatchObject({ props: { rows: 6 } })
 })
+
+test('iTerm2 3.5 and later is sent the picture in fullscreen, and draws it in cells elsewhere', async ($, on) => {
+  world(on, { env: { TERM_PROGRAM: 'iTerm.app', TERM_PROGRAM_VERSION: '3.5.4' } })
+  await startSession($)
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { png: PNG } } })
+})
+
+
+test('iTerm2 off fullscreen draws in cells', async ($, on) => {
+  world(on, { env: { TERM_PROGRAM: 'iTerm.app', TERM_PROGRAM_VERSION: '3.5.4' } })
+  await startSession($)
+  const row = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'ToolResult', requestId: 'tu-1', props: { tool_use_id: 'tu-1', tool: 'Read', output: image(PNG), isErrored: false }, viewport: { ...SCREEN, isFullscreen: false } })
+  expect(await row.find({ type: 'Raster' })).toBeDefined()
+})

@@ -90,6 +90,9 @@ type Loaded = { sources?: ImageSource[]; pixels?: Pixels[]; delays: number[] }
 // How the terminal draws a picture: Ghostty and kitty read a file; one Claude Code was told draws
 // pictures (CLAUDE_CODE_FORCE_TERMINAL_IMAGES) is sent its bytes; any other gets it in colored cells.
 let graphics: 'none' | 'file' | 'bytes' = 'none'
+// iTerm2 3.5 and later draws pictures in fullscreen alone: whether the session is, its first drawing
+// says.
+let isItermPending = false
 let temp: string | undefined
 let sessionId: string | undefined
 let folder: string | undefined
@@ -261,6 +264,13 @@ function forget (key: string) {
     play.timer?.cancel()
     playing.delete(id)
   }
+}
+
+/** Settles iTerm2's way at the first drawing: pixels in fullscreen, cells elsewhere. */
+function settle (e: { viewport?: { isFullscreen?: boolean } }) {
+  if (!isItermPending || e.viewport === undefined) return
+  isItermPending = false
+  graphics = e.viewport.isFullscreen === false ? 'none' : 'bytes'
 }
 
 /** The bytes a picture holds in memory: its frames' pixels, or the base64 it is sent as. */
@@ -888,6 +898,9 @@ export const register: Register = (on, options) => {
     const isRemote = (await $.env.get('SSH_CONNECTION')) !== undefined || (await $.env.get('SSH_TTY')) !== undefined
     const isTmux = (await $.env.get('TMUX')) !== undefined
     graphics = isForced ? 'bytes' : isTmux ? 'none' : isNative ? (isRemote ? 'bytes' : 'file') : 'none'
+    // iTerm2 3.5 and later is sent the bytes, in fullscreen: the first drawing settles it.
+    const [major = 0, minor = 0] = ((await $.env.get('TERM_PROGRAM_VERSION')) ?? '').split('.').map(Number)
+    isItermPending = graphics === 'none' && !isTmux && program === 'iTerm.app' && (major > 3 || (major === 3 && minor >= 5))
     // A reload starts with nothing read: what the state says was read is read again.
     reset()
     await follow($)
@@ -956,6 +969,7 @@ export const register: Register = (on, options) => {
   // Above the prompt, while you write: the pictures pasted in the draft, side by side, each named,
   // small; a click opens one. Sent, they show under the prompt, the same pictures read once.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    settle(e)
     if (!isOn || e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
     const ids = await read($, draft)
     if (ids.length === 0) return next(e)
@@ -987,6 +1001,7 @@ export const register: Register = (on, options) => {
   // A Read of a picture: the picture under its `⎿ Read image` line.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     noteRow(e.requestId)
+    settle(e)
     if (!isOn) return next(e)
     if (e.surface !== 'terminal' || e.props.tool !== 'Read' || e.props.isErrored || !isReadImage(e.props.output)) return next(e)
     await follow($)
@@ -999,6 +1014,7 @@ export const register: Register = (on, options) => {
   // A run of reads folded into one line: each picture read, named, under the line.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     noteRow(e.requestId)
+    settle(e)
     if (!isOn) return next(e)
     // Folded, the group is one count line; unfolded (--verbose, the ctrl+o transcript outside
     // fullscreen), a row a call, which draws its result inline with no ToolResult of its own: either
@@ -1025,6 +1041,7 @@ export const register: Register = (on, options) => {
   // A prompt you sent with pictures pasted in: the pictures under it, side by side.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     noteRow(e.requestId)
+    settle(e)
     if (!isOn) return next(e)
     if (e.surface !== 'terminal' || e.props.origin.kind !== 'composer') return next(e)
     const ids = idsIn(e.props.text)
@@ -1042,6 +1059,7 @@ export const register: Register = (on, options) => {
   // it in the system's viewer. Elsewhere (no pointer) the engine draws it, the embedded pictures under it.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     noteRow(e.requestId)
+    settle(e)
     if (!isOn) return next(e)
     if (!markdown || e.surface !== 'terminal') return next(e)
     const text = e.props.text
