@@ -129,9 +129,12 @@ try {
 } finally { $file.Close() }`, { INLINE_IMAGES_PATH: path, INLINE_IMAGES_AT: String(at), INLINE_IMAGES_COUNT: String(count) })
     : at === 0
       ? await $.process.run(['sh', '-c', 'head -c "$1" "$0" | base64', path, String(count)])
-      : await $.process.run(['sh', '-c', 'dd if="$0" bs="$1" skip="$2" count=1 2>/dev/null | base64', path, String(count), String(at / count)])
+      : await $.process.run(['sh', '-c', 'tail -c +"$2" "$0" | head -c "$1" | base64', path, String(count), String(at + 1)])
   if (result.exitCode !== 0 || result.isStdoutTruncated) throw new Error(`could not read ${path}`)
-  return Uint8Array.fromBase64(result.stdout.replace(/\s+/g, ''))
+  const bytes = Uint8Array.fromBase64(result.stdout.replace(/\s+/g, ''))
+  // The pipe's status is base64's: a file gone, or cut short, reads as nothing.
+  if (bytes.length === 0 && count > 0) throw new Error(`could not read ${path}`)
+  return bytes
 }
 
 /** A converter: macOS's sips, ImageMagick (`magick`, or `convert` before version 7), Windows' PowerShell. */
@@ -187,9 +190,10 @@ async function sizeWith ($: Engine, name: Tool, file: string) {
  * enlarged (sips's -Z would enlarge a smaller one); a JPEG at quality 70. Answers the picture's own
  * size.
  */
-export async function convert ($: Engine, file: string, out: string, format: 'png' | 'bmp' | 'jpeg', side: number) {
+export async function convert ($: Engine, file: string, out: string, format: 'png' | 'bmp' | 'jpeg', side: number, own?: { width: number; height: number }) {
   for (const name of tool ? [tool] : TOOLS[system]) {
-    const size = await sizeWith($, name, file)
+    // A size known already (measured by an earlier conversion, or read from a header) is not measured again.
+    const size = own ?? await sizeWith($, name, file)
     if (!size) continue
     const shrinks = Math.max(size.width, size.height) > side
     const result = name === 'powershell'
@@ -226,8 +230,12 @@ export async function canShowWindows ($: Engine) {
   return (await $.process.run(['python3', '-c', 'import tkinter']).catch(() => undefined))?.exitCode === 0
 }
 
-/** Whether a window of this system shows `file` as it is: Linux's Tk reads PNG and GIF alone. */
-export const windowReads = (file: string) => system !== 'linux' || /\.(png|gif)$/i.test(file)
+/**
+ * Whether a window of this system shows `file` as it is: Linux's Tk reads PNG and GIF alone;
+ * Windows' System.Drawing no WebP, HEIC or AVIF; macOS reads them all.
+ */
+export const windowReads = (file: string) =>
+  system === 'macos' || (system === 'linux' ? /\.(png|gif)$/i.test(file) : !/\.(webp|heic|heif|avif)$/i.test(file))
 
 /** The program that shows `file` in a window by the pointer, `size` its longest side at most, `life` seconds at most. */
 export async function windowCommand ($: Engine, file: string, size: number, life: number): Promise<Command> {

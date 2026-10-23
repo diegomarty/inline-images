@@ -55,7 +55,7 @@ const padded = (base64: string, size: number) => {
  * processes it runs (head, dd, base64, sips, git) and what the engine draws. Like the engine's,
  * `fs.read` rejects a file of 4 MiB or more, and `fs.stat` one that is not there.
  */
-function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' } = {}) {
+function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' | 'unreadable', startMs = 0 } = {}) {
   const clock = mock.clock(on, { now })
   const asked = { sessionId: 0, promptReads: 0 }
   mock.env(on, env)
@@ -137,9 +137,10 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     if (argv[0] === 'sh' && argv[2]?.includes('base64 --decode >') && e.init?.stdin) files[argv[3]!] = e.init.stdin
     // `head -c <count> <file> | base64`: the file's first bytes.
     if (argv[0] === 'sh' && argv[2]?.startsWith('head -c')) return ok(decoded(files[argv[3]!] ?? '').subarray(0, Number(argv[4])).toBase64())
-    if (argv[0] === 'sh' && argv[2]?.startsWith('dd ')) {
-      const [file, bs, skip] = [argv[3]!, Number(argv[4]), Number(argv[5])]
-      return ok(decoded(files[file]!).subarray(skip * bs, (skip + 1) * bs).toBase64())
+    // `tail -c +<from> <file> | head -c <count> | base64`: bytes from <from>, counted from 1.
+    if (argv[0] === 'sh' && argv[2]?.startsWith('tail ')) {
+      const [file, count, from] = [argv[3]!, Number(argv[4]), Number(argv[5])]
+      return ok(decoded(files[file]!).subarray(from - 1, from - 1 + count).toBase64())
     }
     return ok()
   })
@@ -149,7 +150,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     return { value: path in files }
   })
   const lists: string[] = []
-  const local = (path: string) => path.replace(/^.*?\/(?=[A-Za-z]:\/)/, '')
+  const local = (path: string) => path.replace(/^.*?\/(?=[A-Za-z]:[\\/])/, '')
   const children = (dir: string, paths: string[]) => paths.filter(path => path.startsWith(`${dir}/`) && !path.slice(dir.length + 1).includes('/'))
   on('fs.list', ($, e) => {
     lists.push(local(e.path))
@@ -176,15 +177,22 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     return { value: { base64: files[path]! } }
   })
   // A window's program: it says `shown` (or an error), then `.` every tenth of a second till it is ended.
-  const windows: { argv: string[]; env: Record<string, string>; isEnded: boolean }[] = []
-  on('process.spawn', async function * ($, e) {
-    const opened = { argv: [...e.argv], env: { ...e.env }, isEnded: false }
+  // It says `.` as it starts, takes `startMs` to show, and can fail: for want of a display (the
+  // system's), or of reading this picture (the picture's).
+  const windows: { argv: string[]; env: Record<string, string>; isEnded: boolean; isShown: boolean }[] = []
+  on('process.spawn', async function * ($, e, next) {
+    const opened = { argv: [...e.argv], env: { ...e.env }, isEnded: false, isShown: false }
     windows.push(opened)
     try {
-      if (window === 'error') {
-        yield { stream: 'stdout' as const, text: 'error: no display\n' }
+      yield { stream: 'stdout' as const, text: '.\n' }
+      if (window !== 'shown') {
+        yield { stream: 'stdout' as const, text: window === 'error' ? 'error: no display\n' : 'error: cannot read the image\n' }
         return { value: { code: 1, signal: null } }
       }
+      // Ended while it starts, as a killed program is: it never shows.
+      for (let waited = 0; waited < startMs && !next.signal.aborted; waited += 10) await clock.sleep(10)
+      if (next.signal.aborted) return { value: { code: null, signal: 'SIGTERM' } }
+      opened.isShown = true
       yield { stream: 'stdout' as const, text: 'shown\n' }
       for (;;) {
         await clock.sleep(100)
@@ -387,8 +395,8 @@ test('a picture over 4 MiB is drawn: a PNG from its header alone, a GIF read in 
   await readRow($, 'tu-2', '/project/app/big.gif')
   const anim = await resultRow($, 'tu-2', image(gif([0, 1]).toBase64(), 'image/gif', decoded(bigGif).length))
   expect(await anim.find({ type: 'Image' })).toMatchObject({ props: { source: { format: 'rgba', width: 2, height: 1 } } })
-  // Three pieces of 2 MiB: the first through head, the rest through dd.
-  expect(w.runs.filter(run => /^(head|dd) /.test(run.argv[2] ?? '') && run.argv[3] === '/project/app/big.gif' && run.argv[4] === String(2 * 1024 * 1024))).toHaveLength(3)
+  // Three pieces of 2 MiB: the first through head, the rest through tail.
+  expect(w.runs.filter(run => /^(head|tail) /.test(run.argv[2] ?? '') && run.argv[3] === '/project/app/big.gif' && run.argv[4] === String(2 * 1024 * 1024))).toHaveLength(3)
 })
 
 test('a picture that cannot be read is not tried again on every redraw, but is once its file is there', async ($, on) => {
@@ -589,7 +597,7 @@ test("a chip's picture is read before the pointer comes onto it", async ($, on) 
   await startSession($)
   await answer($, 'Saved as shot.png.', 'a-1')
   await w.clock.advance(10)
-  expect(w.runs.some(run => run.argv[2]?.startsWith('head -c') && run.argv[3] === '/project/app/shot.png')).toBe(true)
+  expect(w.reads).toContain('/project/app/shot.png')
 })
 
 // --- Pictures in the unfolded view, and a click on one.
@@ -1041,8 +1049,12 @@ test('in the VS Code extension a picture an answer names shows under it, in an S
 })
 
 test('in the desktop app a picture too large for an Svg is shrunk to a JPEG that fits', async ($, on) => {
-  const big = padded(PNG, 200_000)
-  const w = world(on, { files: { '/project/app/big.png': big }, sizes: { '/project/app/big.png': { width: 3000, height: 2000 } } })
+  // A PNG whose header says 3000 by 2000, 200 KB.
+  const header = decoded(PNG)
+  new DataView(header.buffer).setUint32(16, 3000)
+  new DataView(header.buffer).setUint32(20, 2000)
+  const big = padded(header.toBase64(), 200_000)
+  const w = world(on, { files: { '/project/app/big.png': big } })
   await startSession($)
   await remote($, 'desktop', 'See ![chart](big.png).', 'a-0')
   await w.clock.advance(10)
@@ -1060,4 +1072,112 @@ test('in a remote app a picture that is not there draws nothing, and an answer t
   expect(await missing.find({ type: 'Svg' })).toBeUndefined()
   const plain = await remote($, 'vscode', 'No pictures here.', 'a-2')
   expect(await plain.find({ type: 'Svg' })).toBeUndefined()
+})
+
+// --- What the review of 0.4.0 found, each kept fixed.
+
+test("a picture the window cannot read loses its window alone: the next one still opens in one", async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/a.png': PNG, '/project/app/b.png': PNG }, window: 'unreadable' })
+  await startSession($)
+  const row = await answer($, '1. See a.png\n2. And b.png', 'a-1')
+  for (const [i, rows] of [1, 1].entries()) await row.post({ rows }, { in: `probe:${i}` })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  await w.clock.advance(10)
+  await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:1' })
+  await w.clock.advance(10)
+  expect(w.windows.map(opened => opened.env.INLINE_IMAGES_FILE)).toEqual(['/project/app/a.png', '/project/app/b.png'])
+  // And the first is not tried again.
+  await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:1' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  await w.clock.advance(10)
+  expect(w.windows).toHaveLength(2)
+})
+
+test('a window still starting as the pointer leaves ends before it shows', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, startMs: 1500 })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  await pointPicture(row)
+  await w.clock.advance(10)
+  await pointPicture(row, 'leave')
+  await w.clock.advance(2000)
+  expect(w.windows[0]).toMatchObject({ isEnded: true, isShown: false })
+})
+
+test('a chip opens its window at once, before its picture is read', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const row = await answer($, 'Saved as shot.png.', 'a-1')
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  expect(w.windows.map(opened => opened.env.INLINE_IMAGES_FILE)).toEqual(['/project/app/shot.png'])
+})
+
+test("iTerm2's way is settled by the terminal's own drawing, not an app's", async ($, on) => {
+  world(on, { env: { TERM_PROGRAM: 'iTerm.app', TERM_PROGRAM_VERSION: '3.5.4' }, files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  // The mobile app draws first, off fullscreen as phones are.
+  await $.ui.mount({ plugin: 'inline-images', surface: 'mobile', component: 'AssistantMessage', requestId: 'a-0', props: { text: 'Saved as shot.png.', isFirstOfReply: true }, viewport: { ...SCREEN, isFullscreen: false } })
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { png: PNG } } })
+})
+
+test('in an app a picture written after the answer shows once its file is there', async ($, on) => {
+  const w = world(on)
+  await startSession($)
+  await remote($, 'vscode', 'See ![chart](out/chart.png).', 'a-0')
+  await w.clock.advance(10)
+  w.files['/project/app/out/chart.png'] = PNG
+  await w.clock.advance(4000)
+  // The answer drawn again looks again, and finds it.
+  await remote($, 'vscode', 'See ![chart](out/chart.png).', 'a-1')
+  await w.clock.advance(10)
+  const row = await remote($, 'vscode', 'See ![chart](out/chart.png).', 'a-2')
+  await w.clock.advance(10)
+  expect(await row.find({ type: 'Svg' })).toMatchObject({ props: { alt: 'chart.png' } })
+})
+
+test('a PNG with an alpha channel too large for an Svg is shrunk to a PNG, keeping what is see-through', async ($, on) => {
+  const header = decoded(PNG)
+  new DataView(header.buffer).setUint32(16, 3000)
+  new DataView(header.buffer).setUint32(20, 2000)
+  header[25] = 6
+  const w = world(on, { files: { '/project/app/logo.png': padded(header.toBase64(), 200_000) } })
+  await startSession($)
+  await remote($, 'desktop', 'See ![logo](logo.png).', 'a-0')
+  await w.clock.advance(10)
+  const row = await remote($, 'desktop', 'See ![logo](logo.png).')
+  expect(await row.find({ type: 'Svg' })).toMatchObject({ props: { source: expect.stringContaining('href="data:image/png;base64,') } })
+  // Its size came from its header: never measured by sips.
+  expect(w.runs.some(run => run.argv[0] === 'sips' && run.argv[1] === '-g')).toBe(false)
+})
+
+test('a Windows path in an answer is taken as the absolute path it is', async ($, on) => {
+  const w = world(on, { env: { OS: 'Windows_NT', TEMP: 'C:/Temp' }, files: { 'C:\\Users\\me\\shot.png': PNG } })
+  await startSession($)
+  await remote($, 'vscode', 'Saved as `C:\\Users\\me\\shot.png`.', 'a-0')
+  await w.clock.advance(10)
+  const row = await remote($, 'vscode', 'Saved as `C:\\Users\\me\\shot.png`.')
+  expect(await row.find({ type: 'Svg' })).toMatchObject({ props: { alt: 'shot.png' } })
+})
+
+test('a large PNG drawn in cells is shrunk by the converter, not decoded here', async ($, on) => {
+  const header = decoded(PNG)
+  new DataView(header.buffer).setUint32(16, 2000)
+  new DataView(header.buffer).setUint32(20, 1000)
+  const w = world(on, { env: CELLS, files: { '/project/app/wide.png': header.toBase64() } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/wide.png')
+  const row = await resultRow($, 'tu-1', image(header.toBase64()))
+  expect(await row.find({ type: 'Raster' })).toBeDefined()
+  expect(w.runs.find(run => run.argv[0] === 'sips' && run.argv[3] === 'bmp')).toBeDefined()
+})
+
+test("a small file's header is taken from the one read of it: no process to read it", async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  await resultRow($, 'tu-1', image(PNG))
+  expect(w.runs.some(run => run.argv[2]?.startsWith('head -c'))).toBe(false)
 })

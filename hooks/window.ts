@@ -17,6 +17,8 @@ function run () {
   const env = $.NSProcessInfo.processInfo.environment
   const read = key => { const value = env.objectForKey(key); return value.isNil() ? '' : ObjC.unwrap(value) }
   const say = text => $.NSFileHandle.fileHandleWithStandardOutput.writeData($(text + '\n').dataUsingEncoding($.NSUTF8StringEncoding))
+  // Said at once: the one reading wakes, and ends a window no longer wanted before it shows.
+  say('.')
   const largest = Number(read('INLINE_IMAGES_SIZE')) || 800
   // An accessory app: no Dock icon, never the active one.
   $.NSApplication.sharedApplication.setActivationPolicy(1)
@@ -81,6 +83,8 @@ function run () {
 /** Linux and other X11 desktops: Python's Tk, an undecorated tooltip window. The picture is a PNG. */
 export const LINUX = String.raw`
 import math, os, sys
+# Said at once: the one reading wakes, and ends a window no longer wanted before it shows.
+print('.', flush=True)
 try:
     import tkinter as tk
 except ImportError:
@@ -149,6 +153,8 @@ root.mainloop()
 /** Windows: PowerShell and Windows Forms, a tool window that is never activated. */
 export const WINDOWS = String.raw`
 $ErrorActionPreference = 'Stop'
+# Said at once: the one reading wakes, and ends a window no longer wanted before it shows.
+[Console]::Out.WriteLine('.'); [Console]::Out.Flush()
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $largest = if ($env:INLINE_IMAGES_SIZE) { [int]$env:INLINE_IMAGES_SIZE } else { 800 }
 $life = if ($env:INLINE_IMAGES_LIFE) { [int]$env:INLINE_IMAGES_LIFE } else { 120 }

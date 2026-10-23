@@ -56,10 +56,13 @@ const VIEW_BYTES = 2 * 1024 * 1024
 // it fits.
 const SVG_DATA = 120000
 const SVG_WIDTH = 480
-const SVG_SIDES = [1200, 900, 640, 480, 320]
+const SVG_SIDE = 1200
 // A picture's window: its longest side at most, in points, and how many seconds at most it stays.
 const WINDOW_SIZE = 800
 const WINDOW_LIFE = 120
+// A PNG drawn in cells past this many pixels is shrunk by a converter where there is one, quicker
+// than decoding it here.
+const DECODE_PIXELS = 1_000_000
 // The longest side the cells are sampled from, eight points a cell across.
 const CELL_SOURCE_PIXELS = 800
 // A GIF's frames are shrunk to this side, and all of them together to this many bytes.
@@ -84,7 +87,7 @@ const DRAWN_MS = 2000
 // gone a week never takes it.
 const TOUCH_MS = 6 * 60 * 60 * 1000
 // A picture an answer names without drawing it: in a link's target, in code, or bare.
-const REFERENCE = /\]\(\s*<?([^)\s>]+\.(?:png|jpe?g|gif|webp))>?[^)]*\)|`([^`\n]+\.(?:png|jpe?g|gif|webp))`|((?:~|\.{1,2})?\/?[\w@%+.-]+(?:\/[\w@%+.-]+)*\.(?:png|jpe?g|gif|webp))(?![\w/])/gi
+const REFERENCE = /\]\(\s*<?([^)\s>]+\.(?:png|jpe?g|gif|webp))>?[^)]*\)|`([^`\n]+\.(?:png|jpe?g|gif|webp))`|((?:[A-Za-z]:)?(?:~|\.{1,2})?[\\/]?[\w@%+.-]+(?:[\\/][\w@%+.-]+)*\.(?:png|jpe?g|gif|webp))(?![\w\\/])/gi
 const WEB_LINK = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi
 const MAX_REFERENCES = 24
 // The card a chip opens: the most rows its picture takes, and what the border and caption add.
@@ -95,7 +98,9 @@ const MIN_CARD_ROWS = 6
 const BOTTOM_ROWS = 8
 
 /** What the terminal is shown of a picture, frame by frame: an Image's sources, or pixels to draw in cells. */
-type Loaded = { sources?: ImageSource[]; pixels?: Pixels[]; delays: number[] }
+type Loaded = { sources?: ImageSource[]; pixels?: Pixels[]; href?: Href; delays: number[] }
+/** A picture as an Svg holds it: a data URI, and the picture's own size. */
+type Href = { href: string; width: number; height: number }
 
 // How the terminal draws a picture: Ghostty and kitty read a file; one Claude Code was told draws
 // pictures (CLAUDE_CODE_FORCE_TERMINAL_IMAGES) is sent its bytes; any other gets it in colored cells.
@@ -106,8 +111,11 @@ let graphics: 'none' | 'file' | 'bytes' = 'none'
 // pointer.
 let isItermPending = false
 let canWindow = false
-let shownWindow: { key: string; isOpen: boolean } | undefined
+type Opening = { key: string; isOpen: boolean; stream?: ReturnType<Engine['process']['spawn']> }
+let shownWindow: Opening | undefined
 let pointerOn: string | undefined
+// The pictures a window could not show: the terminal's cells are theirs.
+const noWindow = new Set<string>()
 let temp: string | undefined
 let sessionId: string | undefined
 let folder: string | undefined
@@ -120,10 +128,6 @@ const loaded = new Budget<Loaded>(LOADED_BUDGET, key => forget(key), key => isIn
 const drawnAt = new Map<string, number>()
 const isInUse = (key: string) => Date.now() - (drawnAt.get(key) ?? -Infinity) < DRAWN_MS || [...playing.values()].some(play => play.key === key)
 const loading = new Set<string>()
-// Each picture an Svg draws, by its file: a data URI and its size, or why there is none.
-type Href = { href: string; width: number; height: number } | { error: string }
-const hrefs = new Map<string, Href>()
-const hrefLoading = new Set<string>()
 // The pictures that could not be read, by key, and when: not tried again on every redraw.
 const failed = new Map<string, number>()
 // Which session the mod reads for: a load started in an earlier one keeps nothing it read.
@@ -170,7 +174,7 @@ function nameOf (key: string) {
   return `${key.slice(0, key.indexOf(':'))}-${(hash >>> 0).toString(16)}`
 }
 
-const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+const baseName = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
 
 /** Where pasted images are stored for this session: `<temp>/<project path, dashed>/<session id>/images`. */
 async function sessionFolder ($: Engine) {
@@ -273,7 +277,7 @@ function reset () {
   sourceFiles.clear()
   openers.clear()
   drawnAt.clear()
-  hrefs.clear()
+  noWindow.clear()
   index = undefined
 }
 
@@ -291,58 +295,75 @@ function forget (key: string) {
 const isWindowing = () => canWindow && graphics === 'none'
 
 /** Settles iTerm2's way at the first drawing: pixels in fullscreen, cells elsewhere. */
-function settle (e: { viewport?: { isFullscreen?: boolean } }) {
-  if (!isItermPending || e.viewport === undefined) return
+function settle (e: { surface: string; viewport?: { isFullscreen?: boolean } }) {
+  if (!isItermPending || e.surface !== 'terminal' || e.viewport === undefined) return
   isItermPending = false
   graphics = e.viewport.isFullscreen === false ? 'none' : 'bytes'
 }
 
 /**
- * Shows picture `key` in a window of its own, by the pointer, till closeWindow, while the pointer is
- * on it. The program says `.` ten times a second, so the loop wakes to see it was closed, and leaving
- * the loop ends the program. One that ends without having shown a window says the system shows
- * none: the cards go back to the terminal. After Image Preview's.
+ * Shows picture `key` (from `file`, or the file it was read from) in a window of its own, by the
+ * pointer, till closeWindow, while the pointer is on it. The program says `.` as it starts and ten
+ * times a second after, so the loop wakes to see it was closed, and leaving the loop ends the
+ * program: one started under a pointer that has left ends before it shows. One that cannot show this
+ * picture is not asked to again; one that cannot show any (no display, no Tk, no program) sends the
+ * pictures back to the terminal. After Image Preview's.
  */
-async function openWindow ($: Engine, key: string) {
-  if (pointerOn !== key || (shownWindow?.key === key && shownWindow.isOpen)) return
+async function openWindow ($: Engine, key: string, given?: string) {
+  if (pointerOn !== key || noWindow.has(key) || (shownWindow?.key === key && shownWindow.isOpen)) return
   closeWindow()
-  const opening = { key, isOpen: true }
+  const opening: Opening = { key, isOpen: true }
   shownWindow = opening
-  let file = sourceFiles.get(key)
-  // A window that reads PNG and GIF alone (Linux's Tk) is shown a PNG of any other picture.
-  if (file && !windowReads(file)) {
-    const out = `${await cacheFolder($)}/${nameOf(key)}.window.png`
-    file = await convert($, file, out, 'png', WINDOW_SIZE).then(() => out, () => undefined)
-  }
   let isShown = false
+  let isStarted = false
   let said = ''
-  if (file && opening.isOpen) {
-    try {
-      for await (const { text } of $.process.spawn(await windowCommand($, file, WINDOW_SIZE, WINDOW_LIFE))) {
-        if (said.length < 2000) said += text
-        if (/^shown$/m.test(text)) isShown = true
-        if (!opening.isOpen) break
-      }
-    } catch (error) {
-      said += messageOf(error)
+  try {
+    let file = given ?? sourceFiles.get(key)
+    // A picture the system's window cannot read (Tk reads PNG and GIF; System.Drawing no WebP) is
+    // shown a PNG of it.
+    if (file && !windowReads(file)) {
+      const out = `${await cacheFolder($)}/${nameOf(key)}.window.png`
+      file = await convert($, file, out, 'png', WINDOW_SIZE).then(() => out, () => undefined)
     }
+    if (!file) return void noWindow.add(key)
+    if (!opening.isOpen) return
+    opening.stream = $.process.spawn(await windowCommand($, file, WINDOW_SIZE, WINDOW_LIFE))
+    for await (const { text } of opening.stream) {
+      isStarted = true
+      if (said.length < 2000) said += text
+      if (/^shown$/m.test(text)) isShown = true
+      if (!opening.isOpen) break
+    }
+  } catch (error) {
+    said += messageOf(error)
+  } finally {
+    if (shownWindow === opening) shownWindow = undefined
   }
-  if (shownWindow === opening) shownWindow = undefined
-  if (isShown || !opening.isOpen || !file) return
-  $.ui.log(`inline-images: no window (${said.replace(/\.\n/g, '').trim().slice(0, 300) || 'the program could not start'}); the terminal shows the pictures`, { to: 'debug' })
+  if (isShown || !opening.isOpen) return
+  const reason = said.replace(/\.\n/g, '').trim().slice(0, 300) || 'the program could not start'
+  if (isStarted && !/no display|no tkinter/i.test(said)) {
+    noWindow.add(key)
+    return void $.ui.log(`inline-images: no window for ${baseName(sourceFiles.get(key) ?? key)} (${reason})`, { to: 'debug' })
+  }
+  $.ui.log(`inline-images: no window (${reason}); the terminal shows the pictures`, { to: 'debug' })
   canWindow = false
 }
 
+/** Closes the window, or ends its program before it shows one. */
 function closeWindow () {
-  if (shownWindow) shownWindow.isOpen = false
+  const closing = shownWindow
   shownWindow = undefined
+  if (!closing) return
+  closing.isOpen = false
+  // Its result is never read: ending the stream ends the program.
+  void closing.stream?.return(undefined as never)?.catch(() => undefined)
 }
 
-/** The pointer onto (or off) a picture or a chip: its window opens, or closes. */
-function pointAt ($: Engine, key: string, isOver: boolean) {
+/** The pointer onto (or off) a picture or a chip (`file`, a chip's): its window opens, or closes. */
+function pointAt ($: Engine, key: string, isOver: boolean, file?: string) {
   if (isOver) {
     pointerOn = key
-    void openWindow($, key)
+    void openWindow($, key, file)
     return
   }
   if (pointerOn === key) pointerOn = undefined
@@ -350,9 +371,9 @@ function pointAt ($: Engine, key: string, isOver: boolean) {
 }
 
 /** The bytes a picture holds in memory: its frames' pixels, or the base64 it is sent as. */
-function weightOf ({ sources, pixels }: Loaded) {
+function weightOf ({ sources, pixels, href }: Loaded) {
   const sent = (sources ?? []).reduce((sum, source) => sum + ('rgba' in source ? source.rgba.length : 'png' in source ? source.png.length : 256), 0)
-  return sent + (pixels ?? []).reduce((sum, frame) => sum + frame.data.length, 0)
+  return sent + (pixels ?? []).reduce((sum, frame) => sum + frame.data.length, 0) + (href?.href.length ?? 0)
 }
 
 /** Keeps a picture read, within the budget. */
@@ -420,46 +441,34 @@ function gifSize (bytes: Uint8Array) {
 }
 
 /**
- * Reads a picture once as an Svg draws it: a PNG or GIF small enough as its own bytes (a GIF keeps
- * playing), any other as a JPEG shrunk till it fits the Svg's markup. The drawings that wait on it
- * draw again.
+ * A picture as an Svg holds it: a PNG or GIF small enough as its own bytes (a GIF keeps playing);
+ * any other shrunk till it fits the Svg's markup, a JPEG, or a PNG where it has an alpha channel (a
+ * JPEG would turn what is see-through black). Measured once; each try after the first takes the side
+ * its bytes say should fit.
  */
-async function loadHref ($: Engine, file: string) {
-  const key = `svg:${file}`
-  if (hrefs.has(key) || hrefLoading.has(key)) return
-  hrefLoading.add(key)
-  const mine = epoch
-  let made: Href
-  try {
-    const stat = await $.fs.stat(file).catch(() => {
-      throw new Error('not found')
-    })
-    const head = await readBytes($, file, 0, 32)
-    const own = pngSize(head) ?? gifSize(head)
-    const type = isPng(head) ? 'png' : isGif(head) ? 'gif' : undefined
-    if (type && own && Math.ceil(stat.size / 3) * 4 <= SVG_DATA) {
-      made = { href: `data:image/${type};base64,${(await bytesOf($, file, stat.size)).toBase64()}`, ...own }
-    } else {
-      const out = `${await cacheFolder($)}/${nameOf(key)}`
-      let found: Href | undefined
-      for (const side of SVG_SIDES) {
-        const size = await convert($, file, `${out}-${side}.jpg`, 'jpeg', side)
-        const bytes = await bytesOf($, `${out}-${side}.jpg`)
-        if (Math.ceil(bytes.length / 3) * 4 > SVG_DATA) continue
-        found = { href: `data:image/jpeg;base64,${bytes.toBase64()}`, width: size.width, height: size.height }
-        break
-      }
-      made = found ?? { error: 'too large to show' }
-    }
-  } catch (error) {
-    made = { error: messageOf(error) }
-  } finally {
-    hrefLoading.delete(key)
+async function loadHref ($: Engine, key: string, file: string, head: Uint8Array, all: Uint8Array | undefined, size: number): Promise<[Picture, Loaded]> {
+  const own = pngSize(head) ?? gifSize(head)
+  const type = isPng(head) ? 'png' : isGif(head) ? 'gif' : undefined
+  if (type && own && Math.ceil(size / 3) * 4 <= SVG_DATA) {
+    const bytes = all ?? await bytesOf($, file, size)
+    return [{ ...own, frames: 1 }, { href: { href: `data:image/${type};base64,${bytes.toBase64()}`, ...own }, delays: [0] }]
   }
-  if (mine !== epoch) return
-  hrefs.set(key, made)
-  const picture: Picture = 'error' in made ? made : { width: made.width, height: made.height, frames: 1 }
-  await update($, pictures, all => ({ ...all, [key]: picture })).catch(() => undefined)
+  const format = isPng(head) && (head[25] === 4 || head[25] === 6) ? 'png' : 'jpeg'
+  const out = `${await cacheFolder($)}/${nameOf(key)}.svg.${format === 'png' ? 'png' : 'jpg'}`
+  let measured = own
+  let side = SVG_SIDE
+  for (let tries = 0; tries < 3; tries++) {
+    measured = await convert($, file, out, format, side, measured)
+    const bytes = await bytesOf($, out)
+    const length = Math.ceil(bytes.length / 3) * 4
+    if (length <= SVG_DATA) {
+      const href = { href: `data:image/${format};base64,${bytes.toBase64()}`, width: measured.width, height: measured.height }
+      return [{ width: measured.width, height: measured.height, frames: 1 }, { href, delays: [0] }]
+    }
+    // A picture's bytes go with its area: the side that should fit, a little under.
+    side = Math.max(64, Math.floor(Math.min(side, Math.max(measured.width, measured.height)) * Math.sqrt(SVG_DATA / length) * 0.9))
+  }
+  throw new Error('too large to show')
 }
 
 /** The markup of an Svg drawing a picture at its own shape, SVG_WIDTH CSS pixels wide at most. */
@@ -495,19 +504,26 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: stri
  * is its own (a PNG's header, else the converter's), not the size it was shrunk to: it decides how
  * many cells it takes.
  */
-async function loadStill ($: Engine, key: string, file: string, head: Uint8Array, bytes: number, mtime: number, version: string): Promise<[Picture, Loaded]> {
+async function loadStill ($: Engine, key: string, file: string, head: Uint8Array, bytes: number, mtime: number, version: string, all?: Uint8Array): Promise<[Picture, Loaded]> {
   const out = `${await cacheFolder($)}/${nameOf(key + version)}`
   // A PNG drawn in cells or sent as pixels is decoded here, with no converter: on any system, sips
   // and ImageMagick or not. One that cannot be (too large) goes on to the converter.
   const own = pngSize(head)
   if (own && isPng(head) && graphics !== 'file') {
-    const decoded = await bytesOf($, file, bytes).then(all => [all, decodePng(all)] as const).catch(() => undefined)
-    if (decoded) {
-      const [all, pixels] = decoded
-      const picture = { width: own.width, height: own.height, frames: 1 }
+    const picture = { width: own.width, height: own.height, frames: 1 }
+    // Sent as it is where it is small enough: nothing to decode.
+    if (graphics === 'bytes' && Math.max(own.width, own.height) <= VIEW_PIXELS && bytes <= VIEW_BYTES) {
+      return [picture, { sources: [{ png: (all ?? await bytesOf($, file, bytes)).toBase64() }], delays: [0] }]
+    }
+    // A large one drawn in cells is shrunk by a converter where there is one: quicker than here.
+    if (graphics === 'none' && own.width * own.height > DECODE_PIXELS) {
+      const isConverted = await convert($, file, `${out}.bmp`, 'bmp', CELL_SOURCE_PIXELS, own).then(() => true, () => false)
+      if (isConverted) return [picture, { pixels: [parseBmp(await bytesOf($, `${out}.bmp`))], delays: [0] }]
+    }
+    const pixels = await Promise.resolve(all ?? bytesOf($, file, bytes)).then(decodePng).catch(() => undefined)
+    if (pixels) {
       if (graphics === 'none') return [picture, { pixels: [shrink(pixels, CELL_SOURCE_PIXELS, CELL_SOURCE_PIXELS)], delays: [0] }]
-      // Sent as it is where it is small enough; else as pixels, shrunk to what one may send.
-      if (Math.max(own.width, own.height) <= VIEW_PIXELS && bytes <= VIEW_BYTES) return [picture, { sources: [{ png: all.toBase64() }], delays: [0] }]
+      // Too large to send as it is: as pixels, shrunk to what one may send.
       const side = Math.max(1, Math.floor(Math.min(VIEW_PIXELS, Math.sqrt(VIEW_BYTES / 4 / (own.width * own.height)) * Math.max(own.width, own.height))))
       const small = shrink(pixels, side, side)
       return [picture, { sources: [{ rgba: small.data.toBase64(), width: small.width, height: small.height }], delays: [0] }]
@@ -534,12 +550,12 @@ async function loadStill ($: Engine, key: string, file: string, head: Uint8Array
       size = converted
     }
   }
-  const shown = pngSize(await headOf($, png))
+  const shown = png === file ? own : pngSize(await headOf($, png))
   if (!shown) throw new Error('could not read it')
   size ??= shown
   const picture = { width: size.width, height: size.height, frames: 1 }
   if (graphics === 'file') return [picture, { sources: [{ file: png, format: 'png', generation: generationOf(mtime) }], delays: [0] }]
-  const pngBytes = await bytesOf($, png)
+  const pngBytes = png === file && all ? all : await bytesOf($, png)
   if (pngBytes.length > VIEW_BYTES) throw new Error('too large to send')
   return [picture, { sources: [{ png: pngBytes.toBase64() }], delays: [0] }]
 }
@@ -552,7 +568,7 @@ const messageOf = (error: unknown) => (error instanceof Error ? error.message : 
 /** What a load read: the picture, what it is drawn from, its file, and that file's mtime (a file's). */
 type Read = { picture: Picture; value: Loaded; file: string; mtime?: number }
 
-/** Reads a picture from one origin. */
+/** Reads a picture from one origin: for the terminal, or (a key `svg:…`) for an Svg. */
 async function loadFrom ($: Engine, key: string, origin: Origin): Promise<Read> {
   let file: string
   let size: number
@@ -571,8 +587,14 @@ async function loadFrom ($: Engine, key: string, origin: Origin): Promise<Read> 
     size = Math.floor((origin.base64.length * 3) / 4)
   }
   const version = `@${mtime}`
-  const head = await headOf($, file)
-  const [picture, value] = isGif(head) ? await loadGif($, key, await bytesOf($, file, size), version) : await loadStill($, key, file, head, size, mtime, version)
+  // A file small enough is read once, in the engine, its header taken from it: no process for it.
+  const all = size < READ_LIMIT ? await bytesOf($, file, size) : undefined
+  const head = all ? all.subarray(0, 32) : await headOf($, file)
+  const [picture, value] = key.startsWith('svg:')
+    ? await loadHref($, key, file, head, all, size)
+    : isGif(head)
+      ? await loadGif($, key, all ?? await bytesOf($, file, size), version)
+      : await loadStill($, key, file, head, size, mtime, version, all)
   return { picture, value, file, ...('file' in origin && { mtime }) }
 }
 
@@ -929,7 +951,8 @@ function absolute (target: string, cwd: string, home: string | undefined) {
   try {
     path = decodeURI(path)
   } catch {}
-  if (path.startsWith('/')) return path
+  // An absolute path: POSIX, a Windows drive's (C:\ or C:/), or a share's (\\server).
+  if (path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')) return path
   if (path.startsWith('~/')) return home ? `${home}${path.slice(1)}` : undefined
   return `${cwd}/${path.replace(/^\.\//, '')}`
 }
@@ -1209,21 +1232,24 @@ export const register: Register = (on, options) => {
       const embedded = embeddedIn(text).flatMap(target => absolute(target, cwd, home) ?? [])
       const files = [...new Set([...embedded, ...(await namedIn($, `${e.requestId}#all`, text, cwd))])]
       if (files.length === 0) return next(e)
-      for (const file of files) void loadHref($, file)
+      for (const file of files) {
+        void load($, `svg:${file}`, async () => [{ file }])
+        void recheck($, `svg:${file}`).catch(() => undefined)
+      }
       const all = await read($, pictures)
       const { Box, Svg, Text } = $.ui.resolve(e)
       const drawn: RenderElement[] = []
       for (const file of files) {
-        const made = hrefs.get(`svg:${file}`)
+        const made = loaded.get(`svg:${file}`)?.href
         const picture = all[`svg:${file}`]
         if (picture && 'error' in picture && picture.error === 'not found') continue
         const name = file.startsWith(`${cwd}/`) ? file.slice(cwd.length + 1) : file
-        const shown = made && !('error' in made) ? svgOf(made) : undefined
+        const shown = made ? svgOf(made) : undefined
         drawn.push(
           <Box key={`svg:${file}`} flexDirection="column">
             {shown
               ? <Svg source={shown.source} alt={baseName(file)} width={shown.width} height={shown.height} />
-              : <Text dimColor>{made && 'error' in made ? `${baseName(file)}: no preview, ${made.error}` : `${baseName(file)} loading…`}</Text>}
+              : <Text dimColor>{picture && 'error' in picture ? `${baseName(file)}: no preview, ${picture.error}` : `${baseName(file)} loading…`}</Text>}
             <Text dimColor size="caption">{name}</Text>
           </Box>
         )
@@ -1417,11 +1443,7 @@ export const register: Register = (on, options) => {
     }
     // Where the terminal draws cells, the chip's picture opens in a window, not a card of cells.
     if (isWindowing()) {
-      const key = `file:${path}`
-      if (data?.isOver === true) {
-        pointerOn = key
-        void load($, key, async () => [{ file: path }]).then(() => pointAt($, key, pointerOn === key))
-      } else pointAt($, key, false)
+      pointAt($, `file:${path}`, data?.isOver === true, path)
       return result
     }
     if (data?.isOver === true) {
