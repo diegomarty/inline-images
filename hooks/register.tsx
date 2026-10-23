@@ -5,7 +5,7 @@ import { Budget } from './budget'
 import { decodeGif, isGif, shrink } from './gif'
 import { parseBmp, toCells } from './pixels'
 import { decodePng, isPng } from './png'
-import { convert, detect, makeFolder, open as openFile, readBytes, remove, tempFolder, touch, writeBytes, writeFrames } from './system'
+import { canShowWindows, convert, detect, makeFolder, open as openFile, readBytes, remove, tempFolder, touch, windowCommand, windowReads, writeBytes, writeFrames } from './system'
 import type { Pixels } from './pixels'
 import type { Hovered, Picture, View } from '../types'
 
@@ -50,6 +50,9 @@ const CELL_PIXELS = 8
 const STILL_PIXELS = 1600
 const VIEW_PIXELS = 1024
 const VIEW_BYTES = 2 * 1024 * 1024
+// A picture's window: its longest side at most, in points, and how many seconds at most it stays.
+const WINDOW_SIZE = 800
+const WINDOW_LIFE = 120
 // The longest side the cells are sampled from, eight points a cell across.
 const CELL_SOURCE_PIXELS = 800
 // A GIF's frames are shrunk to this side, and all of them together to this many bytes.
@@ -91,8 +94,13 @@ type Loaded = { sources?: ImageSource[]; pixels?: Pixels[]; delays: number[] }
 // pictures (CLAUDE_CODE_FORCE_TERMINAL_IMAGES) is sent its bytes; any other gets it in colored cells.
 let graphics: 'none' | 'file' | 'bytes' = 'none'
 // iTerm2 3.5 and later draws pictures in fullscreen alone: whether the session is, its first drawing
-// says.
+// says. Where the terminal draws cells, a picture under the pointer opens in a window of its own, on
+// the desktop the session runs on: whether it can, the window open now, and the picture under the
+// pointer.
 let isItermPending = false
+let canWindow = false
+let shownWindow: { key: string; isOpen: boolean } | undefined
+let pointerOn: string | undefined
 let temp: string | undefined
 let sessionId: string | undefined
 let folder: string | undefined
@@ -236,6 +244,7 @@ async function follow ($: Engine) {
 /** Forgets everything read: a new session, or a /clear, whose pasted ids start again from 1. */
 function reset () {
   epoch++
+  closeWindow()
   sessionId = undefined
   folder = undefined
   scannedAt = -Infinity
@@ -266,11 +275,66 @@ function forget (key: string) {
   }
 }
 
+/** Whether a picture under the pointer opens in a window: a terminal that draws cells, on a desktop. */
+const isWindowing = () => canWindow && graphics === 'none'
+
 /** Settles iTerm2's way at the first drawing: pixels in fullscreen, cells elsewhere. */
 function settle (e: { viewport?: { isFullscreen?: boolean } }) {
   if (!isItermPending || e.viewport === undefined) return
   isItermPending = false
   graphics = e.viewport.isFullscreen === false ? 'none' : 'bytes'
+}
+
+/**
+ * Shows picture `key` in a window of its own, by the pointer, till closeWindow, while the pointer is
+ * on it. The program says `.` ten times a second, so the loop wakes to see it was closed, and leaving
+ * the loop ends the program. One that ends without having shown a window says the system shows
+ * none: the cards go back to the terminal. After Image Preview's.
+ */
+async function openWindow ($: Engine, key: string) {
+  if (pointerOn !== key || (shownWindow?.key === key && shownWindow.isOpen)) return
+  closeWindow()
+  const opening = { key, isOpen: true }
+  shownWindow = opening
+  let file = sourceFiles.get(key)
+  // A window that reads PNG and GIF alone (Linux's Tk) is shown a PNG of any other picture.
+  if (file && !windowReads(file)) {
+    const out = `${await cacheFolder($)}/${nameOf(key)}.window.png`
+    file = await convert($, file, out, 'png', WINDOW_SIZE).then(() => out, () => undefined)
+  }
+  let isShown = false
+  let said = ''
+  if (file && opening.isOpen) {
+    try {
+      for await (const { text } of $.process.spawn(await windowCommand($, file, WINDOW_SIZE, WINDOW_LIFE))) {
+        if (said.length < 2000) said += text
+        if (/^shown$/m.test(text)) isShown = true
+        if (!opening.isOpen) break
+      }
+    } catch (error) {
+      said += messageOf(error)
+    }
+  }
+  if (shownWindow === opening) shownWindow = undefined
+  if (isShown || !opening.isOpen || !file) return
+  $.ui.log(`inline-images: no window (${said.replace(/\.\n/g, '').trim().slice(0, 300) || 'the program could not start'}); the terminal shows the pictures`, { to: 'debug' })
+  canWindow = false
+}
+
+function closeWindow () {
+  if (shownWindow) shownWindow.isOpen = false
+  shownWindow = undefined
+}
+
+/** The pointer onto (or off) a picture or a chip: its window opens, or closes. */
+function pointAt ($: Engine, key: string, isOver: boolean) {
+  if (isOver) {
+    pointerOn = key
+    void openWindow($, key)
+    return
+  }
+  if (pointerOn === key) pointerOn = undefined
+  if (shownWindow?.key === key) closeWindow()
 }
 
 /** The bytes a picture holds in memory: its frames' pixels, or the base64 it is sent as. */
@@ -589,6 +653,7 @@ function apply ({ isOn: on, size }: View) {
   isOn = on
   maxRows = size === 'medium' ? optionRows : SIZE_ROWS[size]
   if (on) return
+  closeWindow()
   for (const play of playing.values()) play.timer?.cancel()
   playing.clear()
 }
@@ -901,6 +966,8 @@ export const register: Register = (on, options) => {
     // iTerm2 3.5 and later is sent the bytes, in fullscreen: the first drawing settles it.
     const [major = 0, minor = 0] = ((await $.env.get('TERM_PROGRAM_VERSION')) ?? '').split('.').map(Number)
     isItermPending = graphics === 'none' && !isTmux && program === 'iTerm.app' && (major > 3 || (major === 3 && minor >= 5))
+    // A window by the pointer, on the desktop the session runs on: not over ssh, another machine's.
+    canWindow = options.window !== false && e.isInteractive && !isRemote && (await canShowWindows($))
     // A reload starts with nothing read: what the state says was read is read again.
     reset()
     await follow($)
@@ -1224,8 +1291,12 @@ export const register: Register = (on, options) => {
     // A click on a picture drawn: it opens in the system's viewer.
     const opened = /^open:/.test(e.element) ? openers.get(`${e.requestId}/${e.element}`) : undefined
     if (opened !== undefined) {
+      const data = e.data as { isOver?: unknown; isClicked?: unknown } | null
       const file = sourceFiles.get(opened)
-      if ((e.data as { isClicked?: unknown } | null)?.isClicked === true && file) void openFile($, file)
+      if (data?.isClicked === true) {
+        pointAt($, opened, false)
+        if (file) void openFile($, file)
+      } else if (isWindowing()) pointAt($, opened, data?.isOver === true)
       return result
     }
     const path = /^ref:\d+$/.test(e.element) ? chipFiles.get(`${e.requestId}/${e.element}`) : undefined
@@ -1233,8 +1304,18 @@ export const register: Register = (on, options) => {
     const data = e.data as { isOver?: unknown; isClicked?: unknown } | null
     const isThis = (now: Hovered | null) => now?.requestId === e.requestId && now.element === e.element
     if (data?.isClicked === true) {
+      pointAt($, `file:${path}`, false)
       void openFile($, path)
       await update($, hovered, () => null)
+      return result
+    }
+    // Where the terminal draws cells, the chip's picture opens in a window, not a card of cells.
+    if (isWindowing()) {
+      const key = `file:${path}`
+      if (data?.isOver === true) {
+        pointerOn = key
+        void load($, key, async () => [{ file: path }]).then(() => pointAt($, key, pointerOn === key))
+      } else pointAt($, key, false)
       return result
     }
     if (data?.isOver === true) {

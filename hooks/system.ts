@@ -4,6 +4,8 @@
 // command; WSL with Linux's tools, and Windows' PowerShell and viewer for what Linux there lacks.
 import type { EngineInterface } from 'claude-code'
 
+import { LINUX, MACOS, WINDOWS } from './window'
+
 type Engine = EngineInterface
 
 export type System = 'macos' | 'linux' | 'wsl' | 'windows'
@@ -32,18 +34,27 @@ function encoded (script: string) {
   return bytes.toBase64()
 }
 
+/** A program to run: its arguments and what it is told in the environment. */
+export type Command = { argv: string[]; env: Record<string, string> }
+
 /**
- * Runs a PowerShell script, told what it needs in the environment (INLINE_IMAGES_*). Under WSL it is
- * Windows' own, `powershell.exe`: the variables cross over through WSLENV, the paths among them
+ * How PowerShell runs a script, told what it needs in the environment (INLINE_IMAGES_*). Under WSL it
+ * is Windows' own, `powershell.exe`: the variables cross over through WSLENV, the paths among them
  * (`paths`) turned into their Windows form.
  */
-async function powershell ($: Engine, script: string, env: Record<string, string>, paths: string[] = [], stdin?: string) {
+async function powershellCommand ($: Engine, script: string, env: Record<string, string>, paths: string[] = []): Promise<Command> {
   const isWsl = system === 'wsl'
   const crossing: Record<string, string> = isWsl
     ? { WSLENV: [await $.env.get('WSLENV'), ...Object.keys(env).map(name => (paths.includes(name) ? `${name}/p` : name))].filter(Boolean).join(':') }
     : {}
   const argv = [isWsl ? 'powershell.exe' : 'powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded(`$ErrorActionPreference = 'Stop'\n${script}`)]
-  return $.process.run(argv, { env: { ...env, ...crossing }, ...(stdin !== undefined && { stdin }) })
+  return { argv, env: { ...env, ...crossing } }
+}
+
+/** Runs a PowerShell script (powershellCommand), `stdin` piped to it. */
+async function powershell ($: Engine, script: string, env: Record<string, string>, paths: string[] = [], stdin?: string) {
+  const { argv, env: all } = await powershellCommand($, script, env, paths)
+  return $.process.run(argv, { env: all, ...(stdin !== undefined && { stdin }) })
 }
 
 const ok = (result: { exitCode: number } | undefined, what: string) => {
@@ -202,4 +213,25 @@ export async function open ($: Engine, path: string) {
   }
   const argv = system === 'macos' ? ['open', path] : system === 'windows' ? ['explorer', path.replaceAll('/', '\\')] : ['xdg-open', path]
   await $.process.run(argv).catch(() => undefined)
+}
+
+/**
+ * Whether this system can show a picture in a window of its own, by the pointer: macOS, Windows and
+ * WSL (Windows' own window) always; Linux on a display, with Python's Tk.
+ */
+export async function canShowWindows ($: Engine) {
+  if (system !== 'linux') return true
+  if (!(await $.env.get('DISPLAY'))) return false
+  return (await $.process.run(['python3', '-c', 'import tkinter']).catch(() => undefined))?.exitCode === 0
+}
+
+/** Whether a window of this system shows `file` as it is: Linux's Tk reads PNG and GIF alone. */
+export const windowReads = (file: string) => system !== 'linux' || /\.(png|gif)$/i.test(file)
+
+/** The program that shows `file` in a window by the pointer, `size` its longest side at most, `life` seconds at most. */
+export async function windowCommand ($: Engine, file: string, size: number, life: number): Promise<Command> {
+  const env = { INLINE_IMAGES_FILE: file, INLINE_IMAGES_SIZE: String(size), INLINE_IMAGES_LIFE: String(life) }
+  if (system === 'macos') return { argv: ['osascript', '-l', 'JavaScript', '-e', MACOS], env }
+  if (system === 'linux') return { argv: ['python3', '-c', LINUX], env }
+  return powershellCommand($, WINDOWS, env, ['INLINE_IMAGES_FILE'])
 }

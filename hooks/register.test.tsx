@@ -55,7 +55,7 @@ const padded = (base64: string, size: number) => {
  * processes it runs (head, dd, base64, sips, git) and what the engine draws. Like the engine's,
  * `fs.read` rejects a file of 4 MiB or more, and `fs.stat` one that is not there.
  */
-function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[] } = {}) {
+function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' } = {}) {
   const clock = mock.clock(on, { now })
   const asked = { sessionId: 0, promptReads: 0 }
   mock.env(on, env)
@@ -119,6 +119,16 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
       const size = sizes[argv.at(-1)!] ?? { width: 1, height: 1 }
       return ok(`${argv.at(-1)}\n  pixelWidth: ${size.width}\n  pixelHeight: ${size.height}\n`)
     }
+    // ImageMagick: `magick identify` (or `identify`) tells a size; `magick` (or `convert`) writes `PNG:out` or `BMP3:out`.
+    if ((argv[0] === 'magick' && argv[1] === 'identify') || argv[0] === 'identify') {
+      const size = sizes[argv.at(-1)!.replace(/\[0\]$/, '')] ?? { width: 1, height: 1 }
+      return ok(`${size.width} ${size.height}`)
+    }
+    if (argv[0] === 'magick' || argv[0] === 'convert') {
+      const [format, out] = argv.at(-1)!.split(/:(.*)/) as [string, string]
+      files[out] = format === 'BMP3' ? bmp(0xff0000) : PNG
+      return ok()
+    }
     if (argv[0] === 'sips') {
       const out = argv[argv.indexOf('--out') + 1]!
       files[out] = argv[3] === 'bmp' ? bmp(0xff0000) : PNG
@@ -165,6 +175,25 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     if (decoded(files[path]!).length >= FOUR_MIB) throw new Error('over 4 MiB')
     return { value: { base64: files[path]! } }
   })
+  // A window's program: it says `shown` (or an error), then `.` every tenth of a second till it is ended.
+  const windows: { argv: string[]; env: Record<string, string>; isEnded: boolean }[] = []
+  on('process.spawn', async function * ($, e) {
+    const opened = { argv: [...e.argv], env: { ...e.env }, isEnded: false }
+    windows.push(opened)
+    try {
+      if (window === 'error') {
+        yield { stream: 'stdout' as const, text: 'error: no display\n' }
+        return { value: { code: 1, signal: null } }
+      }
+      yield { stream: 'stdout' as const, text: 'shown\n' }
+      for (;;) {
+        await clock.sleep(100)
+        yield { stream: 'stdout' as const, text: '.\n' }
+      }
+    } finally {
+      opened.isEnded = true
+    }
+  })
   on('ui.blit', ($, e) => {
     blits.push(e as never)
     return { value: {} }
@@ -173,7 +202,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
-  return { clock, runs, reads, exists, stats, lists, blits, files, mtimes, tracked, session, asked, box, scripts }
+  return { clock, runs, reads, exists, stats, lists, blits, files, mtimes, tracked, session, asked, box, scripts, windows }
 }
 
 const startSession = ($: Engine) => $.session.start({ cwd: '/project/app', surface: 'terminal', isInteractive: true })
@@ -888,15 +917,85 @@ test("under WSL a picture opens in Windows' viewer, and converts with Windows' P
   expect(w.runs.find(run => run.argv[0] === 'explorer.exe')?.argv[1]).toBe('\\\\wsl.localhost\\Ubuntu\\home\\me\\shot.jpg')
 })
 
-test('in cells a picture takes half the rows', async ($, on) => {
-  const square = decoded(PNG)
-  new DataView(square.buffer).setUint32(16, 800)
-  new DataView(square.buffer).setUint32(20, 800)
-  world(on, { env: { TERM_PROGRAM: 'Apple_Terminal' }, files: { '/project/app/sq.png': square.toBase64() } })
+// --- Terminals that draw cells: a window by the pointer; iTerm2's pixels.
+
+const CELLS = { TERM_PROGRAM: 'Apple_Terminal' }
+
+/** The pointer onto (or off) the click region over the first picture drawn. */
+async function pointPicture (row: Awaited<ReturnType<typeof resultRow>>, type: 'enter' | 'leave' | 'move' = 'enter') {
+  const region = (await row.findAll({ type: 'Client' })).find(client => String(client.key).startsWith('open:'))!
+  await row.pointer({ type, x: 0, y: 0, in: String(region.key) })
+}
+
+test('in a terminal that draws cells, a picture under the pointer opens in a window, and closes as the pointer leaves', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
   await startSession($)
-  await readRow($, 'tu-1', '/project/app/sq.png')
-  const row = await resultRow($, 'tu-1', image(square.toBase64()))
-  expect(await row.find({ type: 'Raster' })).toMatchObject({ props: { rows: 6 } })
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  await pointPicture(row)
+  await w.clock.advance(10)
+  expect(w.windows).toHaveLength(1)
+  expect(w.windows[0]).toMatchObject({ argv: ['osascript', '-l', 'JavaScript', '-e', expect.stringContaining('NSPanel')], env: { INLINE_IMAGES_FILE: '/project/app/shot.png', INLINE_IMAGES_SIZE: '800' }, isEnded: false })
+  await pointPicture(row, 'leave')
+  await w.clock.advance(200)
+  expect(w.windows[0]!.isEnded).toBe(true)
+})
+
+test('in a terminal that draws cells, a chip opens its picture in a window, not a card of cells', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const row = await answer($, 'Saved as shot.png.', 'a-1')
+  await row.post({ rows: 1 }, { in: 'probe:0' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  await w.clock.advance(10)
+  expect(w.windows.map(opened => opened.env.INLINE_IMAGES_FILE)).toEqual(['/project/app/shot.png'])
+  expect(await row.find({ key: 'card' })).toBeUndefined()
+})
+
+test('a window that cannot show sends the pictures back to the terminal: a chip opens its card again', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, window: 'error' })
+  await startSession($)
+  const row = await answer($, 'Saved as shot.png.', 'a-1')
+  await row.post({ rows: 1 }, { in: 'probe:0' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  await w.clock.advance(10)
+  await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  expect(await row.find({ key: 'card' })).toBeDefined()
+  expect(w.windows).toHaveLength(1)
+})
+
+test("on Windows the window is PowerShell's, and under WSL Windows' own, the picture's path in its Windows form", async ($, on) => {
+  const w = world(on, { uname: 'Linux', env: { WSL_DISTRO_NAME: 'Ubuntu', TERM_PROGRAM: 'vscode', WSLENV: 'WT_SESSION' }, files: { '/home/me/shot.png': PNG } })
+  await startSession($)
+  await readRow($, 'tu-1', '/home/me/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  await pointPicture(row)
+  await w.clock.advance(10)
+  expect(w.windows[0]!.argv[0]).toBe('powershell.exe')
+  expect(w.windows[0]!.env).toMatchObject({ INLINE_IMAGES_FILE: '/home/me/shot.png', WSLENV: 'WT_SESSION:INLINE_IMAGES_FILE/p:INLINE_IMAGES_SIZE:INLINE_IMAGES_LIFE' })
+})
+
+test("on Linux a window needs a display and Python's Tk, and is shown a PNG of a picture Tk cannot read", async ($, on) => {
+  const jpeg = Uint8Array.of(0xff, 0xd8, 0xff, 0xe0).toBase64()
+  const w = world(on, { uname: 'Linux', env: { TERM_PROGRAM: 'vscode', DISPLAY: ':0' }, files: { '/home/me/shot.jpg': jpeg }, sizes: { '/home/me/shot.jpg': { width: 64, height: 64 } } })
+  await startSession($)
+  await readRow($, 'tu-1', '/home/me/shot.jpg')
+  const row = await resultRow($, 'tu-1', image(jpeg, 'image/jpeg'))
+  await pointPicture(row)
+  await w.clock.advance(10)
+  expect(w.windows[0]!.argv.slice(0, 2)).toEqual(['python3', '-c'])
+  expect(w.windows[0]!.env.INLINE_IMAGES_FILE).toMatch(/\.window\.png$/)
+})
+
+test('on Linux with no display, or over ssh, no window: the terminal shows the picture', async ($, on) => {
+  const w = world(on, { uname: 'Linux', env: { TERM_PROGRAM: 'vscode' }, files: { '/home/me/shot.png': PNG } })
+  await startSession($)
+  await readRow($, 'tu-1', '/home/me/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  await pointPicture(row)
+  await w.clock.advance(10)
+  expect(w.windows).toHaveLength(0)
 })
 
 test('iTerm2 3.5 and later is sent the picture in fullscreen, and draws it in cells elsewhere', async ($, on) => {
@@ -906,10 +1005,20 @@ test('iTerm2 3.5 and later is sent the picture in fullscreen, and draws it in ce
   expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { png: PNG } } })
 })
 
-
 test('iTerm2 off fullscreen draws in cells', async ($, on) => {
   world(on, { env: { TERM_PROGRAM: 'iTerm.app', TERM_PROGRAM_VERSION: '3.5.4' } })
   await startSession($)
   const row = await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'ToolResult', requestId: 'tu-1', props: { tool_use_id: 'tu-1', tool: 'Read', output: image(PNG), isErrored: false }, viewport: { ...SCREEN, isFullscreen: false } })
   expect(await row.find({ type: 'Raster' })).toBeDefined()
+})
+
+test('in cells a picture takes half the rows', async ($, on) => {
+  const square = decoded(PNG)
+  new DataView(square.buffer).setUint32(16, 800)
+  new DataView(square.buffer).setUint32(20, 800)
+  world(on, { env: CELLS, files: { '/project/app/sq.png': square.toBase64() } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/sq.png')
+  const row = await resultRow($, 'tu-1', image(square.toBase64()))
+  expect(await row.find({ type: 'Raster' })).toMatchObject({ props: { rows: 6 } })
 })

@@ -28,13 +28,16 @@ Do not also install the mod from the marketplace while you run it from a folder:
 | --- | --- |
 | `hooks/register.tsx` | The hooks module: every event the mod handles, and how it reads, keeps and draws pictures |
 | `hooks/gif.ts` | The GIF decoder: frames, delays and disposal, each frame shrunk as it is decoded |
+| `hooks/png.ts`, `hooks/inflate.ts` | The PNG decoder and the DEFLATE it needs: a PNG drawn in cells or sent as pixels with no converter |
+| `hooks/system.ts` | What the mod asks of the system (folders, bytes, conversions, the viewer, the window), a way for each: macOS, Linux, Windows with PowerShell, WSL |
+| `hooks/window.ts` | The programs that show a picture in a window by the pointer: macOS, Windows, Linux (from Image Preview) |
 | `hooks/pixels.ts` | BMP parsing, and the painter that draws a picture in block-element cells |
 | `hooks/budget.ts` | The memory budget: least recently used, by bytes |
 | `hooks/chip.tsx` | The surface module of a chip and of a picture's click region |
 | `hooks/probe.tsx` | The surface module that measures each block of an answer |
 | `hooks/register.test.tsx` | The tests, run against the engine |
 | `types/index.d.ts` | The contract of the mod's `$.state` values |
-| `scripts/` | The icon and the README's illustrations, drawn with Pillow |
+| `scripts/` | The icon and the README's illustrations, drawn with Pillow; `system-check.ts`, the system layer run for real |
 
 The engine's API is described by the types it writes to `.claude-plugin/types/` the first time it loads the mod. That folder is ignored by git. Grep it for an event or a method before you use it, since the API is early access and changes between Claude Code versions.
 

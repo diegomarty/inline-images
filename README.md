@@ -45,7 +45,24 @@ A Claude Code mod: see pictures in the transcript, as the desktop app shows them
 
 ## How it draws
 
-In Ghostty and kitty the terminal draws the picture itself, through the kitty graphics protocol: it reads the PNG, or each frame of a GIF, from a file, so no picture crosses Claude Code. `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` sends the bytes to a terminal Claude Code does not know draws pictures (iTerm2 3.5 and later, under fullscreen rendering), shrunk to 1024 pixels and 2 MB. Elsewhere the picture is drawn in colored block elements, GIFs too: each cell sampled at eight by eight points, in linear light, in any terminal with true color. Cells are coarse: a screenshot of text shows its layout, not text you can read.
+| Terminal | In the transcript | Under the pointer |
+| --- | --- | --- |
+| Ghostty, kitty | The picture itself: the terminal draws it, through the kitty graphics protocol, reading the PNG (or each frame of a GIF) from a file | — |
+| iTerm2 3.5 and later, in fullscreen | The picture itself, sent as its bytes, shrunk to 1024 pixels and 2 MB | — |
+| Any other (the VS Code terminal, Windows Terminal, Terminal.app, GNOME Terminal, Konsole, iTerm2 off fullscreen, tmux) | Colored cells, at half the rows | The picture at full quality, in a window of its own by the pointer |
+
+Where the terminal draws cells, each is sampled at eight by eight points, in linear light, and drawn with the block that splits them best, in any terminal with true color, GIFs too. Cells are coarse: a screenshot of text shows its layout, not text you can read. So the pictures take half the rows there, and a picture under the pointer (one drawn, or a chip's) opens at full quality in a small borderless window by the pointer, outside the terminal: above it and to its right, or where there is room, never over it. It never takes the focus or the pointer, so you keep typing and hovering, and it closes as the pointer leaves. Each system draws it with what it has:
+
+| System | The window | Needs |
+| --- | --- | --- |
+| macOS | An AppKit panel with the HUD material, run by `osascript` (JavaScript for Automation) | Nothing to install |
+| Windows | A Windows Forms tool window, run by PowerShell | Nothing to install |
+| WSL | The same Windows Forms window, run by `powershell.exe` from WSL | Nothing to install |
+| Linux | A Tk tooltip window on X11 (a picture other than PNG or GIF converted to a PNG) | Python's Tk (`python3-tk` on Debian and Ubuntu) |
+
+There is no window over ssh (it would open on the other machine), on Linux without a display, or with the **Preview in a window** option off: there the terminal's cells are all. A window's program that cannot show one sends the pictures back to the terminal for the rest of the session. The windows come from [Image Preview](https://github.com/midudev/better-claude/tree/main/plugins/image-preview)'s.
+
+`CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` sends the bytes to a terminal Claude Code does not know draws pictures, shrunk to 1024 pixels and 2 MB.
 
 <p align="center">
   <img src="docs/pixels-and-cells.png" alt="Illustration: the same picture under a Read row, in pixels in Ghostty and kitty, and in colored cells in any other terminal with true color" width="760">
@@ -72,6 +89,7 @@ It answers with how pictures are drawn now. A reload of the mod keeps what it se
 | Picture height | 12 | The most terminal rows a picture takes. |
 | Play GIFs | on | Off, a GIF shows its first frame. |
 | Pictures in answers | on | Show the local pictures an answer embeds, and a chip for each one it names. |
+| Preview in a window | on | Where the terminal draws cells, a picture or a chip under the pointer opens at full quality in a window by the pointer. Off, the cells are all. |
 
 ## Install
 
@@ -116,6 +134,7 @@ One hooks module ([`hooks/register.tsx`](hooks/register.tsx)), a GIF decoder ([`
 
 - An `AbovePrompt` hook draws the draft's strip from a list of its `[Image #N]`, kept by `prompt.edit` (a key, a paste) and `prompt.change` (every other change of the box: a recalled entry, a submit or a clear, a plugin's fill).
 - `ui.render` hooks on `ToolResult` and `ToolGroup` (Read calls whose output is an image), `UserMessage` (the `[Image #N]` of a sent prompt) and `AssistantMessage` (markdown images, and the pictures an answer names) draw the engine's row, then the pictures or chips under it.
+- Where the terminal draws cells, a picture or a chip under the pointer starts a window's program ([`hooks/window.ts`](hooks/window.ts)) with `$.process.spawn`, told the picture, its largest side and how long it may stay. It says `shown` once the window is up, then a `.` every tenth of a second, so the mod wakes to end it when the pointer leaves: it stops reading, and the program ends.
 - Each chip is a `Client` ([`hooks/chip.tsx`](hooks/chip.tsx), as in Image Preview) that posts when the pointer comes onto it, leaves it and clicks it; a `ui.message` hook keeps which chip has the pointer, and the answer draws the card last, `position: "absolute"`, over the rows above the chip's block (or below it, where the rows above are too few), so nothing moves under the pointer and no block paints over it. Where each block is comes from a probe in it ([`hooks/probe.tsx`](hooks/probe.tsx)), an unpainted `Client` as tall as its block, that says how many rows it was laid out in.
 - Each picture is read once, in the background: a GIF is decoded into frames ([`hooks/gif.ts`](hooks/gif.ts)) and each written to a raw RGBA file; a PNG is drawn from its file, or decoded ([`hooks/png.ts`](hooks/png.ts), with its own inflate) to be drawn in cells or sent as pixels; any other picture from a PNG or BMP a converter writes. What it asks of the system (folders, bytes, conversions, the viewer) goes through [`hooks/system.ts`](hooks/system.ts), a way for each system. The rows that wait on it draw again.
 - A GIF is a keyed `Image` (or `Raster`, in cells); `$.ui.blit` swaps its frame after each delay, with no redraw. A row reported off screen stops its animation.
