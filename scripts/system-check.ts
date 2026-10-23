@@ -49,7 +49,14 @@ function png (width: number, height: number) {
     const part = raw.slice(at, at + 65535)
     blocks.push(at + 65535 >= raw.length ? 1 : 0, part.length & 0xff, part.length >> 8, ~part.length & 0xff, (~part.length >> 8) & 0xff, ...part)
   }
-  blocks.push(0, 0, 0, 0)
+  // The zlib stream's Adler-32 of the raw bytes: libpng (ImageMagick's) checks it.
+  let a = 1
+  let b = 0
+  for (const byte of raw) {
+    a = (a + byte) % 65521
+    b = (b + a) % 65521
+  }
+  blocks.push(b >> 8, b & 0xff, a >> 8, a & 0xff)
   const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0 })
   const crc = (bytes: number[]) => { let c = 0xffffffff; for (const b of bytes) c = crcTable[(c ^ b) & 0xff]! ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0 }
   const u32 = (n: number) => [24, 16, 8, 0].map(s => (n >>> s) & 0xff)
