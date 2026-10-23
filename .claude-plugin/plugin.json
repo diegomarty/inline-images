@@ -1,6 +1,6 @@
 {
   "name": "inline-images",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "See pictures in the transcript, as the desktop app shows them: the images Claude reads, the ones you paste and those its answers link to; GIFs play.",
   "author": {
     "name": "DiegoMarty",
