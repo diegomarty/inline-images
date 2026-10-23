@@ -887,3 +887,14 @@ test("under WSL a picture opens in Windows' viewer, and converts with Windows' P
   await row.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: String(region.key) })
   expect(w.runs.find(run => run.argv[0] === 'explorer.exe')?.argv[1]).toBe('\\\\wsl.localhost\\Ubuntu\\home\\me\\shot.jpg')
 })
+
+test('in cells a picture takes half the rows', async ($, on) => {
+  const square = decoded(PNG)
+  new DataView(square.buffer).setUint32(16, 800)
+  new DataView(square.buffer).setUint32(20, 800)
+  world(on, { env: { TERM_PROGRAM: 'Apple_Terminal' }, files: { '/project/app/sq.png': square.toBase64() } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/sq.png')
+  const row = await resultRow($, 'tu-1', image(square.toBase64()))
+  expect(await row.find({ type: 'Raster' })).toMatchObject({ props: { rows: 6 } })
+})

@@ -593,7 +593,8 @@ function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessag
     ui: $.ui.resolve(e),
     requestId: e.requestId,
     maxColumns: Math.max(8, Math.min(MAX_COLUMNS, (e.viewport?.columns ?? 80) - indent - 2)),
-    maxRows,
+    // In cells a picture shows its layout, not its detail: half the rows do as well.
+    maxRows: graphics === 'none' ? Math.max(3, Math.round(maxRows / 2)) : maxRows,
     // Off screen (`null`) an animation stops; a surface that does not say counts as on screen.
     isShown: !('onScreen' in e.props) || e.props.onScreen !== null,
     animate,
