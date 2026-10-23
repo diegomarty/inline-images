@@ -116,14 +116,22 @@ export function decodePng (bytes: Uint8Array, maxPixels = 4096 * 4096): Pixels {
         const out = ((y0 + y * dy) * width + x0 + x * dx) * 4
         if (colour === 3) {
           const index = sample(x, 0)
-          rgba.set([palette?.[index * 3] ?? 0, palette?.[index * 3 + 1] ?? 0, palette?.[index * 3 + 2] ?? 0, alphas?.[index] ?? 255], out)
+          rgba[out] = palette?.[index * 3] ?? 0
+          rgba[out + 1] = palette?.[index * 3 + 1] ?? 0
+          rgba[out + 2] = palette?.[index * 3 + 2] ?? 0
+          rgba[out + 3] = alphas?.[index] ?? 255
           continue
         }
-        const values = Array.from({ length: channels }, (_, c) => sample(x, c))
-        const [r, g, b] = colour === 0 || colour === 4 ? [values[0]!, values[0]!, values[0]!] : [values[0]!, values[1]!, values[2]!]
-        const opaque = key && (colour === 0 ? values[0] === key[0] : values[0] === key[0] && values[1] === key[1] && values[2] === key[2]) ? 0 : 255
-        const alpha = colour === 4 ? byte(values[1]!) : colour === 6 ? byte(values[3]!) : opaque
-        rgba.set([byte(r), byte(g), byte(b), alpha], out)
+        // Grey (with or without alpha) has one colour sample; the rest three.
+        const isGrey = colour === 0 || colour === 4
+        const r = sample(x, 0)
+        const g = isGrey ? r : sample(x, 1)
+        const b = isGrey ? r : sample(x, 2)
+        const opaque = key && r === key[0] && (isGrey || (g === key[1] && b === key[2])) ? 0 : 255
+        rgba[out] = byte(r)
+        rgba[out + 1] = byte(g)
+        rgba[out + 2] = byte(b)
+        rgba[out + 3] = colour === 4 ? byte(sample(x, 1)) : colour === 6 ? byte(sample(x, 3)) : opaque
       }
     }
     at += h * (lineBytes + 1)
