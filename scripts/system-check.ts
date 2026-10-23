@@ -4,8 +4,11 @@
 //
 //     node --experimental-strip-types scripts/system-check.ts
 //
-// CI runs it on macOS, Ubuntu (with ImageMagick) and Windows (PowerShell, System.Drawing).
-import { spawnSync } from 'node:child_process'
+// CI runs it on macOS, Ubuntu (with ImageMagick, and Tk on a virtual display) and Windows
+// (PowerShell, System.Drawing, Windows Forms). Where the system can show a window by the pointer,
+// one opens for a moment.
+import { spawn, spawnSync } from 'node:child_process'
+import { registerHooks } from 'node:module'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,7 +19,19 @@ proto.toBase64 ??= function (this: Uint8Array) { return Buffer.from(this).toStri
 const ctor = Uint8Array as unknown as { fromBase64?: (text: string) => Uint8Array }
 ctor.fromBase64 ??= (text: string) => new Uint8Array(Buffer.from(text, 'base64'))
 
-const { convert, detect, makeFolder, readBytes, remove, tempFolder, touch, writeBytes, writeFrames } = await import('../hooks/system.ts')
+// The mod's imports name no extension, as the engine takes them: Node is told to try `.ts`.
+registerHooks({
+  resolve (specifier, context, next) {
+    try {
+      return next(specifier, context)
+    } catch (error) {
+      if (!specifier.startsWith('.')) throw error
+      return next(`${specifier}.ts`, context)
+    }
+  }
+})
+
+const { canShowWindows, convert, detect, makeFolder, readBytes, remove, tempFolder, touch, windowCommand, writeBytes, writeFrames } = await import('../hooks/system.ts')
 
 /** The part of the engine's `$` the system layer uses, run for real. */
 const $ = {
@@ -103,6 +118,23 @@ try {
   check('convert never enlarges a smaller picture', new DataView(out.buffer, out.byteOffset).getUint32(16) === 300)
 } catch (error) {
   check('convert', false, error instanceof Error ? error.message : String(error))
+}
+
+// The window by the pointer: its program says `shown` once the window is up.
+if (await canShowWindows($)) {
+  const command = await windowCommand($, file, 200, 3)
+  const said = await new Promise<string>(resolve => {
+    const child = spawn(command.argv[0]!, command.argv.slice(1), { env: { ...process.env, ...command.env } })
+    let out = ''
+    const done = () => { child.kill(); resolve(out) }
+    child.stdout.on('data', chunk => { out += chunk; if (/^(shown|error)/m.test(out)) done() })
+    child.stderr.on('data', chunk => { out += chunk })
+    child.on('exit', () => resolve(out))
+    setTimeout(done, 60_000)
+  })
+  check('the window by the pointer shows the picture', /^shown$/m.test(said), said.trim().split('\n')[0]?.slice(0, 200))
+} else {
+  console.log('skip the window by the pointer: this system cannot show one here')
 }
 
 await touch($, folder)

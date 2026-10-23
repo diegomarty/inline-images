@@ -34,9 +34,14 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install ImageMagick
+      - name: Install ImageMagick, Tk and a virtual display
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y imagemagick
+        run: sudo apt-get update && sudo apt-get install -y imagemagick python3-tk xvfb
 
       - name: Check the system layer
+        if: runner.os != 'Linux'
         run: node --experimental-strip-types scripts/system-check.ts
+
+      - name: Check the system layer, on a virtual display
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum node --experimental-strip-types scripts/system-check.ts
