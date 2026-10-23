@@ -237,10 +237,20 @@ export async function canShowWindows ($: Engine) {
 export const windowReads = (file: string) =>
   system === 'macos' || (system === 'linux' ? /\.(png|gif)$/i.test(file) : !/\.(webp|heic|heif|avif)$/i.test(file))
 
-/** The program that shows `file` in a window by the pointer, `size` its longest side at most, `life` seconds at most. */
-export async function windowCommand ($: Engine, file: string, size: number, life: number): Promise<Command> {
-  const env = { INLINE_IMAGES_FILE: file, INLINE_IMAGES_SIZE: String(size), INLINE_IMAGES_LIFE: String(life) }
+/**
+ * The program that shows pictures in a window by the pointer, one at a time, for as long as the
+ * session lasts: it reads what to show from `commands` (see window.ts), `size` a picture's longest
+ * side at most.
+ */
+export async function windowCommand ($: Engine, commands: string, size: number): Promise<Command> {
+  const env = { INLINE_IMAGES_COMMANDS: commands, INLINE_IMAGES_SIZE: String(size) }
   if (system === 'macos') return { argv: ['osascript', '-l', 'JavaScript', '-e', MACOS], env }
   if (system === 'linux') return { argv: ['python3', '-c', LINUX], env }
-  return powershellCommand($, WINDOWS, env, ['INLINE_IMAGES_FILE'])
+  return powershellCommand($, WINDOWS, env, ['INLINE_IMAGES_COMMANDS'])
+}
+
+/** `path` as the window's program reads it: under WSL, its Windows form. */
+export async function windowPath ($: Engine, path: string) {
+  if (system === 'wsl') return (await $.process.run(['wslpath', '-w', path]).catch(() => undefined))?.stdout.trim() || undefined
+  return system === 'windows' ? path.replaceAll('/', '\\') : path
 }

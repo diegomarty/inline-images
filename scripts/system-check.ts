@@ -31,7 +31,7 @@ registerHooks({
   }
 })
 
-const { canShowWindows, convert, detect, makeFolder, readBytes, remove, tempFolder, touch, windowCommand, writeBytes, writeFrames } = await import('../hooks/system.ts')
+const { canShowWindows, convert, detect, makeFolder, readBytes, remove, tempFolder, touch, windowCommand, windowPath, writeBytes, writeFrames } = await import('../hooks/system.ts')
 
 /** The part of the engine's `$` the system layer uses, run for real. */
 const $ = {
@@ -123,19 +123,35 @@ try {
   check('convert', false, error instanceof Error ? error.message : String(error))
 }
 
-// The window by the pointer: its program says `shown` once the window is up.
+// The window by the pointer: its program, told in a file, opens the window with a spinner, then
+// fills it with the picture and says `shown`; a picture it cannot read it says so of, and it ends
+// when told.
 if (await canShowWindows($)) {
-  const command = await windowCommand($, file, 200, 3)
-  const said = await new Promise<string>(resolve => {
-    const child = spawn(command.argv[0]!, command.argv.slice(1), { env: { ...process.env, ...command.env } })
-    let out = ''
-    const done = () => { child.kill(); resolve(out) }
-    child.stdout.on('data', chunk => { out += chunk; if (/^(shown|error)/m.test(out)) done() })
-    child.stderr.on('data', chunk => { out += chunk })
-    child.on('exit', () => resolve(out))
-    setTimeout(done, 60_000)
-  })
-  check('the window by the pointer shows the picture', /^shown$/m.test(said), said.trim().split('\n')[0]?.slice(0, 200))
+  const commands = join(root, 'window.txt')
+  writeFileSync(commands, '')
+  const command = await windowCommand($, commands, 200)
+  const child = spawn(command.argv[0]!, command.argv.slice(1), { env: { ...process.env, ...command.env } })
+  let out = ''
+  child.stdout.on('data', chunk => { out += chunk })
+  child.stderr.on('data', chunk => { out += chunk })
+  const ended = new Promise(resolve => child.on('exit', resolve))
+  const said = async (pattern: RegExp, ms: number) => {
+    for (const end = Date.now() + ms; Date.now() < end && !pattern.test(out); ) await new Promise(resolve => setTimeout(resolve, 50))
+    return pattern.test(out)
+  }
+  const tell = (number: number, verb: string, path = '', width = 0, height = 0) => writeFileSync(commands, `${number}\n${verb}\n${path}\n${width}\n${height}\nend\n`)
+  check('the window\'s program starts and reads its commands', await said(/^ready$/m, 60_000), out.trim().split('\n').filter(line => line !== '.')[0]?.slice(0, 200))
+  tell(1, 'show', '', 300, 200)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  tell(2, 'show', (await windowPath($, file)) ?? file, 300, 200)
+  check('the window shows the picture, in the window its spinner opened', await said(/^shown 2$/m, 10_000))
+  tell(3, 'show', (await windowPath($, join(root, 'missing.png'))) ?? '')
+  check('the window says which picture it cannot read', await said(/^error 3: /m, 10_000))
+  tell(4, 'hide')
+  await new Promise(resolve => setTimeout(resolve, 300))
+  tell(5, 'quit')
+  check('the window\'s program ends when told', await Promise.race([ended.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 10_000))]) as boolean)
+  child.kill()
 } else {
   console.log('skip the window by the pointer: this system cannot show one here')
 }

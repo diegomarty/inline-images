@@ -176,30 +176,44 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     if (decoded(files[path]!).length >= FOUR_MIB) throw new Error('over 4 MiB')
     return { value: { base64: files[path]! } }
   })
-  // A window's program: it says `shown` (or an error), then `.` every tenth of a second till it is ended.
-  // It says `.` as it starts, takes `startMs` to show, and can fail: for want of a display (the
-  // system's), or of reading this picture (the picture's).
-  const windows: { argv: string[]; env: Record<string, string>; isEnded: boolean; isShown: boolean }[] = []
-  on('process.spawn', async function * ($, e, next) {
-    const opened = { argv: [...e.argv], env: { ...e.env }, isEnded: false, isShown: false }
-    windows.push(opened)
+  // What the mod writes, by path.
+  const written: Record<string, string> = {}
+  on('fs.write', ($, e) => {
+    written[local(e.path)] = e.text
+    return { value: undefined }
+  })
+  // The window's program (window.ts), one a session: it says `.`, then `ready` (`startMs` on), and
+  // reads its commands every 40 ms, doing the latest; a picture it shows it says `shown <n>` of, one
+  // it cannot read `error <n>: …`. Or it cannot run at all, for want of a display.
+  const windows: { argv: string[]; env: Record<string, string>; isEnded: boolean }[] = []
+  const shows: { verb: string; path: string; width: number; height: number }[] = []
+  on('process.spawn', async function * ($, e) {
+    const started = { argv: [...e.argv], env: { ...e.env }, isEnded: false }
+    windows.push(started)
     try {
       yield { stream: 'stdout' as const, text: '.\n' }
-      if (window !== 'shown') {
-        yield { stream: 'stdout' as const, text: window === 'error' ? 'error: no display\n' : 'error: cannot read the image\n' }
+      if (window === 'error') {
+        yield { stream: 'stdout' as const, text: 'error: no display\n' }
         return { value: { code: 1, signal: null } }
       }
-      // Ended while it starts, as a killed program is: it never shows.
-      for (let waited = 0; waited < startMs && !next.signal.aborted; waited += 10) await clock.sleep(10)
-      if (next.signal.aborted) return { value: { code: null, signal: 'SIGTERM' } }
-      opened.isShown = true
-      yield { stream: 'stdout' as const, text: 'shown\n' }
+      if (startMs > 0) await clock.sleep(startMs)
+      yield { stream: 'stdout' as const, text: 'ready\n' }
+      let last = 0
       for (;;) {
-        await clock.sleep(100)
+        const lines = (written[local(started.env.INLINE_IMAGES_COMMANDS ?? '')] ?? '').split('\n')
+        const number = Number(lines[0])
+        if (lines[5] === 'end' && number > last) {
+          last = number
+          const [, verb = '', path = '', width, height] = lines
+          if (verb === 'quit') return { value: { code: 0, signal: null } }
+          shows.push({ verb, path, width: Number(width), height: Number(height) })
+          if (verb === 'show' && path) yield { stream: 'stdout' as const, text: window === 'unreadable' ? `error ${number}: cannot read the image\n` : `shown ${number}\n` }
+        }
+        await clock.sleep(40)
         yield { stream: 'stdout' as const, text: '.\n' }
       }
     } finally {
-      opened.isEnded = true
+      started.isEnded = true
     }
   })
   on('ui.blit', ($, e) => {
@@ -210,7 +224,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
-  return { clock, runs, reads, exists, stats, lists, blits, files, mtimes, tracked, session, asked, box, scripts, windows }
+  return { clock, runs, reads, exists, stats, lists, blits, files, mtimes, tracked, session, asked, box, scripts, windows, shows, written }
 }
 
 const startSession = ($: Engine) => $.session.start({ cwd: '/project/app', surface: 'terminal', isInteractive: true })
@@ -935,39 +949,68 @@ async function pointPicture (row: Awaited<ReturnType<typeof resultRow>>, type: '
   await row.pointer({ type, x: 0, y: 0, in: String(region.key) })
 }
 
-test('in a terminal that draws cells, a picture under the pointer opens in a window, and closes as the pointer leaves', async ($, on) => {
+/** What the window was told to show, in order: each picture's path, or none while it is made. */
+const shown = (w: ReturnType<typeof world>) => w.shows.filter(show => show.verb === 'show').map(show => show.path)
+
+test('in a terminal that draws cells, a picture under the pointer opens in the window, and the window closes as the pointer leaves', async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
   await startSession($)
+  await w.clock.advance(10)
+  // The window's program starts with the session, before any picture is pointed at: one for it.
+  expect(w.windows).toHaveLength(1)
+  expect(w.windows[0]).toMatchObject({ argv: ['osascript', '-l', 'JavaScript', '-e', expect.stringContaining('NSPanel')], env: { INLINE_IMAGES_COMMANDS: expect.stringMatching(/\/window\.txt$/), INLINE_IMAGES_SIZE: '800' } })
   await readRow($, 'tu-1', '/project/app/shot.png')
   const row = await resultRow($, 'tu-1', image(PNG))
   await pointPicture(row)
-  await w.clock.advance(10)
-  expect(w.windows).toHaveLength(1)
-  expect(w.windows[0]).toMatchObject({ argv: ['osascript', '-l', 'JavaScript', '-e', expect.stringContaining('NSPanel')], env: { INLINE_IMAGES_FILE: '/project/app/shot.png', INLINE_IMAGES_SIZE: '800' }, isEnded: false })
+  await w.clock.advance(50)
+  // Its size goes with it: the window opens that large at once, a spinner in it till the picture is read.
+  expect(w.shows).toEqual([{ verb: 'show', path: '/project/app/shot.png', width: 1, height: 1 }])
   await pointPicture(row, 'leave')
-  await w.clock.advance(200)
+  await w.clock.advance(50)
+  expect(w.shows.at(-1)!.verb).toBe('hide')
+  await pointPicture(row)
+  await w.clock.advance(50)
+  expect(shown(w)).toEqual(['/project/app/shot.png', '/project/app/shot.png'])
+  expect(w.windows).toHaveLength(1)
+})
+
+test('going from one picture straight to the next shows the next: the leave of the first does not hide it', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/a.png': PNG, '/project/app/b.png': PNG } })
+  await startSession($)
+  const row = await answer($, '1. See a.png\n2. And b.png', 'a-1')
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:1' })
+  await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
+  await w.clock.advance(50)
+  expect(w.shows.at(-1)).toMatchObject({ verb: 'show', path: '/project/app/b.png' })
+})
+
+test('the session ending ends the window\'s program', async ($, on) => {
+  const w = world(on, { env: CELLS })
+  await startSession($)
+  await w.clock.advance(10)
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 's-1', resume: { id: 's-1' } })
+  await w.clock.advance(100)
   expect(w.windows[0]!.isEnded).toBe(true)
 })
 
-test('in a terminal that draws cells, a chip opens its picture in a window, not a card of cells', async ($, on) => {
+test('in a terminal that draws cells, a chip opens its picture in the window, not a card of cells', async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
   await startSession($)
   const row = await answer($, 'Saved as shot.png.', 'a-1')
   await row.post({ rows: 1 }, { in: 'probe:0' })
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  await w.clock.advance(10)
-  expect(w.windows.map(opened => opened.env.INLINE_IMAGES_FILE)).toEqual(['/project/app/shot.png'])
+  await w.clock.advance(50)
+  expect(shown(w)).toEqual(['/project/app/shot.png'])
   expect(await row.find({ key: 'card' })).toBeUndefined()
 })
 
 test('a window that cannot show sends the pictures back to the terminal: a chip opens its card again', async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, window: 'error' })
   await startSession($)
+  await w.clock.advance(10)
   const row = await answer($, 'Saved as shot.png.', 'a-1')
   await row.post({ rows: 1 }, { in: 'probe:0' })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  await w.clock.advance(10)
-  await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
   expect(await row.find({ key: 'card' })).toBeDefined()
   expect(w.windows).toHaveLength(1)
@@ -979,29 +1022,29 @@ test("on Windows the window is PowerShell's, and under WSL Windows' own, the pic
   await readRow($, 'tu-1', '/home/me/shot.png')
   const row = await resultRow($, 'tu-1', image(PNG))
   await pointPicture(row)
-  await w.clock.advance(10)
+  await w.clock.advance(50)
   expect(w.windows[0]!.argv[0]).toBe('powershell.exe')
-  expect(w.windows[0]!.env).toMatchObject({ INLINE_IMAGES_FILE: '/home/me/shot.png', WSLENV: 'WT_SESSION:INLINE_IMAGES_FILE/p:INLINE_IMAGES_SIZE:INLINE_IMAGES_LIFE' })
+  expect(w.windows[0]!.env).toMatchObject({ WSLENV: 'WT_SESSION:INLINE_IMAGES_COMMANDS/p:INLINE_IMAGES_SIZE' })
+  expect(shown(w)).toEqual(['\\\\wsl.localhost\\Ubuntu\\home\\me\\shot.png'])
 })
 
-test("on Linux a window needs a display and Python's Tk, and is shown a PNG of a picture Tk cannot read", async ($, on) => {
+test("on Linux a window needs a display and Python's Tk, and is shown a PNG of a picture Tk cannot read, a spinner in it meanwhile", async ($, on) => {
   const jpeg = Uint8Array.of(0xff, 0xd8, 0xff, 0xe0).toBase64()
   const w = world(on, { uname: 'Linux', env: { TERM_PROGRAM: 'vscode', DISPLAY: ':0' }, files: { '/home/me/shot.jpg': jpeg }, sizes: { '/home/me/shot.jpg': { width: 64, height: 64 } } })
   await startSession($)
   await readRow($, 'tu-1', '/home/me/shot.jpg')
   const row = await resultRow($, 'tu-1', image(jpeg, 'image/jpeg'))
   await pointPicture(row)
-  await w.clock.advance(10)
+  await w.clock.advance(50)
   expect(w.windows[0]!.argv.slice(0, 2)).toEqual(['python3', '-c'])
-  expect(w.windows[0]!.env.INLINE_IMAGES_FILE).toMatch(/\.window\.png$/)
+  expect(shown(w).at(-1)).toMatch(/\.window\.png$/)
 })
 
 test('on Linux with no display, or over ssh, no window: the terminal shows the picture', async ($, on) => {
   const w = world(on, { uname: 'Linux', env: { TERM_PROGRAM: 'vscode' }, files: { '/home/me/shot.png': PNG } })
   await startSession($)
   await readRow($, 'tu-1', '/home/me/shot.png')
-  const row = await resultRow($, 'tu-1', image(PNG))
-  await pointPicture(row)
+  await resultRow($, 'tu-1', image(PNG))
   await w.clock.advance(10)
   expect(w.windows).toHaveLength(0)
 })
@@ -1082,19 +1125,19 @@ test("a picture the window cannot read loses its window alone: the next one stil
   const row = await answer($, '1. See a.png\n2. And b.png', 'a-1')
   for (const [i, rows] of [1, 1].entries()) await row.post({ rows }, { in: `probe:${i}` })
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  await w.clock.advance(10)
+  await w.clock.advance(50)
   await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:1' })
-  await w.clock.advance(10)
-  expect(w.windows.map(opened => opened.env.INLINE_IMAGES_FILE)).toEqual(['/project/app/a.png', '/project/app/b.png'])
+  await w.clock.advance(50)
+  expect(shown(w)).toEqual(['/project/app/a.png', '/project/app/b.png'])
   // And the first is not tried again.
   await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:1' })
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  await w.clock.advance(10)
-  expect(w.windows).toHaveLength(2)
+  await w.clock.advance(50)
+  expect(shown(w)).toHaveLength(2)
 })
 
-test('a window still starting as the pointer leaves ends before it shows', async ($, on) => {
+test('a picture pointed at while the window\'s program starts shows once it is ready; one left meanwhile never does', async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, startMs: 1500 })
   await startSession($)
   await readRow($, 'tu-1', '/project/app/shot.png')
@@ -1103,7 +1146,10 @@ test('a window still starting as the pointer leaves ends before it shows', async
   await w.clock.advance(10)
   await pointPicture(row, 'leave')
   await w.clock.advance(2000)
-  expect(w.windows[0]).toMatchObject({ isEnded: true, isShown: false })
+  expect(shown(w)).toEqual([])
+  await pointPicture(row)
+  await w.clock.advance(50)
+  expect(shown(w)).toEqual(['/project/app/shot.png'])
 })
 
 test('a chip opens its window at once, before its picture is read', async ($, on) => {
@@ -1111,7 +1157,8 @@ test('a chip opens its window at once, before its picture is read', async ($, on
   await startSession($)
   const row = await answer($, 'Saved as shot.png.', 'a-1')
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(w.windows.map(opened => opened.env.INLINE_IMAGES_FILE)).toEqual(['/project/app/shot.png'])
+  await w.clock.advance(50)
+  expect(shown(w)).toEqual(['/project/app/shot.png'])
 })
 
 test("iTerm2's way is settled by the terminal's own drawing, not an app's", async ($, on) => {

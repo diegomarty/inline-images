@@ -41,7 +41,7 @@
     "window": {
       "type": "boolean",
       "title": "Preview in a window",
-      "description": "Where the terminal cannot draw a picture itself (the VS Code terminal, Windows Terminal, Terminal.app…), a picture or a chip under the pointer opens at full quality in a small window of its own by the pointer, outside the terminal (macOS, Windows, WSL, and Linux with X11 and Python's tkinter). Off, the terminal shows it in cells.",
+      "description": "Where the terminal cannot draw a picture itself (the VS Code terminal, Windows Terminal, Terminal.app…), a picture or a chip under the pointer opens at full quality in a small window of its own by the pointer, outside the terminal (macOS, Windows, WSL, and Linux with X11 and Python's tkinter). The window opens at once with a spinner, and the picture fills it. Off, the terminal shows it in cells.",
       "default": true
     }
   }

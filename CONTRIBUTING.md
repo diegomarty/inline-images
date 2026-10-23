@@ -30,7 +30,7 @@ Do not also install the mod from the marketplace while you run it from a folder:
 | `hooks/gif.ts` | The GIF decoder: frames, delays and disposal, each frame shrunk as it is decoded |
 | `hooks/png.ts`, `hooks/inflate.ts` | The PNG decoder and the DEFLATE it needs: a PNG drawn in cells or sent as pixels with no converter |
 | `hooks/system.ts` | What the mod asks of the system (folders, bytes, conversions, the viewer, the window), a way for each: macOS, Linux, Windows with PowerShell, WSL |
-| `hooks/window.ts` | The programs that show a picture in a window by the pointer: macOS, Windows, Linux (from Image Preview) |
+| `hooks/window.ts` | The programs that show pictures in a window by the pointer, one for the session, told what to show in a file: macOS, Windows, Linux (after Image Preview's) |
 | `hooks/pixels.ts` | BMP parsing, and the painter that draws a picture in block-element cells |
 | `hooks/budget.ts` | The memory budget: least recently used, by bytes |
 | `hooks/chip.tsx` | The surface module of a chip and of a picture's click region |

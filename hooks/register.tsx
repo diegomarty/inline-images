@@ -5,7 +5,7 @@ import { Budget } from './budget'
 import { decodeGif, isGif, shrink } from './gif'
 import { parseBmp, toCells } from './pixels'
 import { decodePng, isPng } from './png'
-import { canShowWindows, convert, detect, makeFolder, open as openFile, readBytes, remove, tempFolder, touch, windowCommand, windowReads, writeBytes, writeFrames } from './system'
+import { canShowWindows, convert, detect, makeFolder, open as openFile, readBytes, remove, tempFolder, touch, windowCommand, windowPath, windowReads, writeBytes, writeFrames } from './system'
 import type { Pixels } from './pixels'
 import type { Hovered, Picture, View } from '../types'
 
@@ -57,9 +57,10 @@ const VIEW_BYTES = 2 * 1024 * 1024
 const SVG_DATA = 120000
 const SVG_WIDTH = 480
 const SVG_SIDE = 1200
-// A picture's window: its longest side at most, in points, and how many seconds at most it stays.
+// A picture's window: its longest side at most, in points. Its program, ended on its own (not by
+// the session), is started again so many times at most.
 const WINDOW_SIZE = 800
-const WINDOW_LIFE = 120
+const WINDOW_STARTS = 3
 // A PNG drawn in cells past this many pixels is shrunk by a converter where there is one, quicker
 // than decoding it here.
 const DECODE_PIXELS = 1_000_000
@@ -111,8 +112,22 @@ let graphics: 'none' | 'file' | 'bytes' = 'none'
 // pointer.
 let isItermPending = false
 let canWindow = false
-type Opening = { key: string; isOpen: boolean; stream?: ReturnType<Engine['process']['spawn']> }
-let shownWindow: Opening | undefined
+// The window's program, one a session (window.ts): what it says, the file it is told what to do in,
+// the number of the last thing told, what is still to be written there, and the picture each show
+// was for.
+type Host = {
+  stream: ReturnType<Engine['process']['spawn']>
+  commands: string
+  number: number
+  isReady: boolean
+  next?: string
+  isWriting: boolean
+  shows: Map<number, string>
+}
+let host: Host | undefined
+let hostStarts = 0
+// The picture the window is for (up, or on its way), and the one under the pointer.
+let windowKey: string | undefined
 let pointerOn: string | undefined
 // The pictures a window could not show: the terminal's cells are theirs.
 const noWindow = new Set<string>()
@@ -259,7 +274,6 @@ async function follow ($: Engine) {
 /** Forgets everything read: a new session, or a /clear, whose pasted ids start again from 1. */
 function reset () {
   epoch++
-  closeWindow()
   sessionId = undefined
   folder = undefined
   scannedAt = -Infinity
@@ -302,72 +316,145 @@ function settle (e: { surface: string; viewport?: { isFullscreen?: boolean } }) 
 }
 
 /**
- * Shows picture `key` (from `file`, or the file it was read from) in a window of its own, by the
- * pointer, till closeWindow, while the pointer is on it. The program says `.` as it starts and ten
- * times a second after, so the loop wakes to see it was closed, and leaving the loop ends the
- * program: one started under a pointer that has left ends before it shows. One that cannot show this
- * picture is not asked to again; one that cannot show any (no display, no Tk, no program) sends the
- * pictures back to the terminal. After Image Preview's.
+ * Starts the window's program: one for the session, started before the pointer comes, as it takes a
+ * while to (PowerShell's above all). It shows one picture at a time, told in a file.
  */
-async function openWindow ($: Engine, key: string, given?: string) {
-  if (pointerOn !== key || noWindow.has(key) || (shownWindow?.key === key && shownWindow.isOpen)) return
-  closeWindow()
-  const opening: Opening = { key, isOpen: true }
-  shownWindow = opening
-  let isShown = false
-  let isStarted = false
+async function startHost ($: Engine) {
+  if (host) return host
+  if (!canWindow || hostStarts >= WINDOW_STARTS) return undefined
+  hostStarts++
+  const commands = `${await cacheFolder($)}/window.txt`
+  await $.fs.write(commands, '')
+  if (host) return host
+  const started: Host = { stream: $.process.spawn(await windowCommand($, commands, WINDOW_SIZE)), commands, number: 0, isReady: false, isWriting: false, shows: new Map() }
+  host = started
+  void readHost($, started)
+  return started
+}
+
+/**
+ * Reads what the window's program says while it runs. A picture it cannot read is not shown it
+ * again; a program that cannot run at all (no display, no Tk) sends the pictures back to the
+ * terminal.
+ */
+async function readHost ($: Engine, running: Host) {
   let said = ''
+  let rest = ''
   try {
-    let file = given ?? sourceFiles.get(key)
-    // A picture the system's window cannot read (Tk reads PNG and GIF; System.Drawing no WebP) is
-    // shown a PNG of it.
-    if (file && !windowReads(file)) {
-      const out = `${await cacheFolder($)}/${nameOf(key)}.window.png`
-      file = await convert($, file, out, 'png', WINDOW_SIZE).then(() => out, () => undefined)
-    }
-    if (!file) return void noWindow.add(key)
-    if (!opening.isOpen) return
-    opening.stream = $.process.spawn(await windowCommand($, file, WINDOW_SIZE, WINDOW_LIFE))
-    for await (const { text } of opening.stream) {
-      isStarted = true
-      if (said.length < 2000) said += text
-      if (/^shown$/m.test(text)) isShown = true
-      if (!opening.isOpen) break
+    for await (const { stream, text } of running.stream) {
+      if (stream === 'stderr') {
+        if (said.length < 2000) said += text
+        continue
+      }
+      const lines = (rest + text).split('\n')
+      rest = lines.pop() ?? ''
+      for (const line of lines.map(line => line.trim())) {
+        if (line === 'ready') running.isReady = true
+        const failed = /^error (\d+): (.*)$/.exec(line)
+        const key = failed ? running.shows.get(Number(failed[1])) : undefined
+        if (key !== undefined) {
+          noWindow.add(key)
+          if (windowKey === key) windowKey = undefined
+          $.ui.log(`inline-images: no window for ${baseName(sourceFiles.get(key) ?? key)} (${failed![2]})`, { to: 'debug' })
+        } else if (line.startsWith('error') && said.length < 2000) said += `${line}\n`
+      }
     }
   } catch (error) {
     said += messageOf(error)
-  } finally {
-    if (shownWindow === opening) shownWindow = undefined
   }
-  if (isShown || !opening.isOpen) return
-  const reason = said.replace(/\.\n/g, '').trim().slice(0, 300) || 'the program could not start'
-  if (isStarted && !/no display|no tkinter/i.test(said)) {
-    noWindow.add(key)
-    return void $.ui.log(`inline-images: no window for ${baseName(sourceFiles.get(key) ?? key)} (${reason})`, { to: 'debug' })
-  }
-  $.ui.log(`inline-images: no window (${reason}); the terminal shows the pictures`, { to: 'debug' })
+  if (host !== running) return
+  host = undefined
+  windowKey = undefined
+  // Ended before it was ready, or saying it cannot run here: the cells are all.
+  if (running.isReady && !/^error: /m.test(said)) return
   canWindow = false
+  $.ui.log(`inline-images: no window (${said.trim().slice(0, 300) || 'the program could not start'}); the terminal shows the pictures`, { to: 'debug' })
 }
 
-/** Closes the window, or ends its program before it shows one. */
-function closeWindow () {
-  const closing = shownWindow
-  shownWindow = undefined
-  if (!closing) return
-  closing.isOpen = false
-  // Its result is never read: ending the stream ends the program.
-  void closing.stream?.return(undefined as never)?.catch(() => undefined)
+/**
+ * Tells the window's program to show a picture (its path in the program's form, none while it is
+ * made, and its size where known), to hide the window, or to end; started first to show one. Told
+ * in order: what is told while a write is on its way is written after it, the latest alone.
+ */
+async function tell ($: Engine, verb: 'show' | 'hide' | 'quit', key?: string, path = '', width = 0, height = 0) {
+  const running = verb === 'show' ? await startHost($) : host
+  if (!running) return
+  const number = ++running.number
+  if (key !== undefined) {
+    running.shows.set(number, key)
+    if (running.shows.size > MAX_KNOWN) running.shows.delete(running.shows.keys().next().value!)
+  }
+  running.next = `${number}\n${verb}\n${path}\n${width}\n${height}\nend\n`
+  if (running.isWriting) return
+  running.isWriting = true
+  try {
+    while (running.next !== undefined) {
+      const text = running.next
+      running.next = undefined
+      await $.fs.write(running.commands, text)
+    }
+  } finally {
+    running.isWriting = false
+  }
+}
+
+/**
+ * Shows picture `key` (from `file`, or the file it was read from) in the window by the pointer:
+ * the window opens at once, a spinner in it where the picture takes a moment (one the window cannot
+ * read is made a PNG first), and the picture fills it.
+ */
+async function openWindow ($: Engine, key: string, given?: string) {
+  if (pointerOn !== key || noWindow.has(key) || windowKey === key) return
+  windowKey = key
+  const picture = (await read($, pictures))[key]
+  const [width, height] = picture && 'width' in picture ? [picture.width, picture.height] : [0, 0]
+  let file = given ?? sourceFiles.get(key)
+  const isReadable = file !== undefined && windowReads(file)
+  await tell($, 'show', key, isReadable ? await windowPath($, file!) : '', width, height)
+  if (isReadable) return
+  // A picture the system's window cannot read (Tk reads PNG and GIF; System.Drawing no WebP) is
+  // shown a PNG of it.
+  if (file) {
+    const out = `${await cacheFolder($)}/${nameOf(key)}.window.png`
+    file = await convert($, file, out, 'png', WINDOW_SIZE).then(() => out, () => undefined)
+  }
+  if (windowKey !== key) return
+  const path = file && (await windowPath($, file))
+  if (path) return tell($, 'show', key, path, width, height)
+  noWindow.add(key)
+  windowKey = undefined
+  await tell($, 'hide')
+}
+
+/** Closes the window. */
+function closeWindow ($: Engine) {
+  if (windowKey === undefined) return
+  windowKey = undefined
+  void tell($, 'hide').catch(() => undefined)
+}
+
+/** Ends the window's program: the session ends. */
+async function stopHost ($: Engine) {
+  const running = host
+  host = undefined
+  windowKey = undefined
+  pointerOn = undefined
+  hostStarts = 0
+  if (!running) return
+  // Told to end (a program under WSL outlives its stream), and its stream ended.
+  await $.fs.write(running.commands, `${running.number + 1}\nquit\n\n0\n0\nend\n`).catch(() => undefined)
+  void running.stream.return(undefined as never)?.catch(() => undefined)
 }
 
 /** The pointer onto (or off) a picture or a chip (`file`, a chip's): its window opens, or closes. */
 function pointAt ($: Engine, key: string, isOver: boolean, file?: string) {
   if (isOver) {
     pointerOn = key
-    void openWindow($, key, file)
+    void openWindow($, key, file).catch(() => undefined)
     return
   }
   if (pointerOn === key) pointerOn = undefined
-  if (shownWindow?.key === key) closeWindow()
+  if (windowKey === key) closeWindow($)
 }
 
 /** The bytes a picture holds in memory: its frames' pixels, or the base64 it is sent as. */
@@ -727,7 +814,7 @@ function play ($: Engine, requestId: string, element: string, key: string, colum
   return started.frame
 }
 
-type Site = { ui: Ui; requestId: string; maxColumns: number; maxRows: number; isShown: boolean; animate: boolean; canClick: boolean }
+type Site = { ui: Ui; requestId: string; maxColumns: number; maxRows: number; isShown: boolean; animate: boolean; canPoint: boolean }
 
 // The options: the most rows a picture takes, and whether GIFs play. And what `/images` set: whether
 // pictures are drawn at all, and the most rows small and large ones take (medium: the option's).
@@ -739,11 +826,11 @@ const SIZE_ROWS = { small: 6, large: 24 }
 const START_VIEW: View = { isOn: true, size: 'medium' }
 
 /** Draws the pictures as `/images` set: off, none (each row the engine's own), and nothing plays. */
-function apply ({ isOn: on, size }: View) {
+function apply ($: Engine, { isOn: on, size }: View) {
   isOn = on
   maxRows = size === 'medium' ? optionRows : SIZE_ROWS[size]
   if (on) return
-  closeWindow()
+  closeWindow($)
   for (const play of playing.values()) play.timer?.cancel()
   playing.clear()
 }
@@ -764,7 +851,7 @@ function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessag
     isShown: !('onScreen' in e.props) || e.props.onScreen !== null,
     animate,
     // The pointer reaches a picture in fullscreen alone.
-    canClick: e.viewport?.isFullscreen !== false
+    canPoint: e.viewport?.isFullscreen !== false
   }
 }
 
@@ -785,7 +872,7 @@ function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: st
   const drawn = frames.sources
     ? <Image key={element} source={frames.sources[frame]!} columns={columns} rows={rows} alt={label} />
     : <Raster key={element} columns={columns} rows={rows} cells={cellsOf(key, frame, columns, rows)} />
-  if (!site.canClick) return drawn
+  if (!site.canPoint) return drawn
   // Over the picture, an unpainted region of its size: a click on it opens the picture in the
   // system's viewer.
   const opener = `open:${element}`
@@ -1060,6 +1147,7 @@ export const register: Register = (on, options) => {
     // A window by the pointer, on the desktop the session runs on: not over ssh, another machine's.
     canWindow = options.window !== false && e.isInteractive && !isRemote && (await canShowWindows($))
     // A reload starts with nothing read: what the state says was read is read again.
+    await stopHost($)
     reset()
     await follow($)
     await update($, pictures, () => ({}))
@@ -1068,10 +1156,13 @@ export const register: Register = (on, options) => {
     touchTimer?.cancel()
     touchTimer = $.clock.every(TOUCH_MS, () => void touchCache($))
     // A reload keeps what /images set.
-    apply(await read($, view))
+    apply($, await read($, view))
     // The draft as it stands; edits and every other change of the box follow from here.
     await track($, (await $.prompt.read()).text)
     await $.command.register({ name: 'images', description: 'Inline Images: turn the pictures on or off, or set their size', argumentHint: 'on | off | small | medium | large', immediate: true })
+    // The window's program, started now so the first picture under the pointer opens at once
+    // (iTerm2's, once its first drawing says it draws cells).
+    if (isWindowing() && !isItermPending) void startHost($).catch(() => undefined)
     return result
   })
 
@@ -1087,7 +1178,7 @@ export const register: Register = (on, options) => {
     }
     const next: View = size ? { isOn: true, size } : { ...now, isOn: word === '' ? !now.isOn : word === 'on' }
     await update($, view, () => next)
-    apply(next)
+    apply($, next)
     // Off, the chips go with no 'leave' from under a resting pointer: their card goes too.
     if (!next.isOn) await update($, hovered, () => null)
     $.ui.invalidate('ui.render')
@@ -1100,13 +1191,14 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     const result = await next(e)
     // Forgotten before the cache goes, so nothing drawn meanwhile writes into the one going.
+    await stopHost($)
     reset()
     await sweepEnded($, e.sessionId)
     await update($, pictures, () => ({}))
     await update($, hovered, () => null)
     // The next session starts as any does: pictures on, at medium.
     await update($, view, () => START_VIEW)
-    apply(START_VIEW)
+    apply($, START_VIEW)
     return result
   })
 
