@@ -1181,3 +1181,53 @@ test("a small file's header is taken from the one read of it: no process to read
   await resultRow($, 'tu-1', image(PNG))
   expect(w.runs.some(run => run.argv[2]?.startsWith('head -c'))).toBe(false)
 })
+
+// --- A spinner under the pointer while a window opens.
+
+const SPINNING = /^ ?[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]( opening)?$/
+const spinning = async (row: { find: Awaited<ReturnType<typeof resultRow>>['find'] }) => (await row.find({ type: 'Text', text: SPINNING })) !== undefined
+
+test('a picture shows a spinner at once while its window starts, and none once it is up or the pointer leaves', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, startMs: 500 })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await spinning(row)).toBe(false)
+  await pointPicture(row)
+  const before = await row.find({ type: 'Text', text: SPINNING })
+  // A picture this small has no room for a box: the spinner alone.
+  expect(before).toMatchObject({ text: expect.stringMatching(/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]$/) })
+  // It turns.
+  await w.clock.advance(100)
+  expect((await row.find({ type: 'Text', text: SPINNING }))!.text).not.toBe(before!.text)
+  await w.clock.advance(500)
+  expect(await spinning(row)).toBe(false)
+  // The pointer back on it: a new window, the spinner again; gone as the pointer leaves.
+  await pointPicture(row, 'leave')
+  await w.clock.advance(200)
+  await pointPicture(row)
+  expect(await spinning(row)).toBe(true)
+  await pointPicture(row, 'leave')
+  expect(await spinning(row)).toBe(false)
+})
+
+test('a picture whose window cannot show stops its spinner', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, window: 'error' })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  await pointPicture(row)
+  await w.clock.advance(100)
+  expect(await spinning(row)).toBe(false)
+})
+
+test('where a chip opens a window, a spinner turns beside it till the window is up', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, startMs: 500 })
+  await startSession($)
+  const row = await answer($, 'Saved as shot.png.', 'a-1')
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
+  expect(await row.find({ key: 'row:ref:0' })).toBeDefined()
+  expect(await spinning(row)).toBe(true)
+  await w.clock.advance(600)
+  expect(await spinning(row)).toBe(false)
+})
