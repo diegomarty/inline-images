@@ -49,7 +49,7 @@ A Claude Code mod: see pictures in the transcript, as the desktop app shows them
 | --- | --- | --- |
 | Ghostty, kitty | The picture itself: the terminal draws it, through the kitty graphics protocol, reading the PNG (or each frame of a GIF) from a file | — |
 | iTerm2 3.5 and later, in fullscreen | The picture itself, sent as its bytes, shrunk to 1024 pixels and 2 MB | — |
-| Any other (the VS Code terminal, Windows Terminal, Terminal.app, GNOME Terminal, Konsole, iTerm2 off fullscreen, tmux) | Colored cells, at half the rows | The picture at full quality, in a window of its own by the pointer |
+| Any other (the VS Code terminal, Windows Terminal, Terminal.app, GNOME Terminal, Konsole, iTerm2 off fullscreen, tmux) | Colored cells, at half the rows | In the fullscreen interface, the picture at full quality, in a window of its own by the pointer |
 
 Where the terminal draws cells, each is sampled at eight by eight points, in linear light, and drawn with the block that splits them best, in any terminal with true color, GIFs too. Cells are coarse: a screenshot of text shows its layout, not text you can read. So the pictures take half the rows there, and a picture under the pointer (one drawn, or a chip's) opens at full quality in a small borderless window by the pointer, outside the terminal: above it and to its right, or where there is room, never over it. It never takes the focus or the pointer, so you keep typing and hovering, and it closes as the pointer leaves. Each system draws it with what it has:
 
@@ -60,7 +60,7 @@ Where the terminal draws cells, each is sampled at eight by eight points, in lin
 | WSL | The same Windows Forms window, run by `powershell.exe` from WSL | Nothing to install |
 | Linux | A Tk tooltip window on X11 (a picture other than PNG or GIF converted to a PNG) | Python's Tk (`python3-tk` on Debian and Ubuntu) |
 
-There is no window over ssh (it would open on the other machine), on Linux without a display, or with the **Preview in a window** option off: there the terminal's cells are all. A window's program that cannot show one sends the pictures back to the terminal for the rest of the session. The windows come from [Image Preview](https://github.com/midudev/better-claude/tree/main/plugins/image-preview)'s.
+There is no window off the fullscreen interface (with no pointer to follow, as in iTerm2 or tmux outside it), over ssh (it would open on the other machine), on Linux without a display, or with the **Preview in a window** option off: there the terminal's cells are all. A window's program that cannot show one sends the pictures back to the terminal for the rest of the session. The windows come from [Image Preview](https://github.com/midudev/better-claude/tree/main/plugins/image-preview)'s.
 
 `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` sends the bytes to a terminal Claude Code does not know draws pictures, shrunk to 1024 pixels and 2 MB.
 
