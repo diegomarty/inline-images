@@ -34,14 +34,14 @@ A Claude Code mod: see pictures in the transcript, as the desktop app shows them
 - **What Claude reads**: a `Read` of a PNG, JPEG, WebP or GIF shows the picture under its `⎿ Read image` line. A run of reads folded into one line (`Read 3 files`) shows each picture under it, named, and so does the same run unfolded (`--verbose`, or ctrl+o outside fullscreen).
 - **What you paste**: while you write, the pictures pasted in the draft show in a strip above the prompt, small, side by side, each named `[Image #N]`; sent, the prompt shows them under it. Where the strip is narrow it draws the pictures that fit, each name whole, and counts the rest (`+3 more`).
 - **What Claude embeds**: an answer with `![alt](path)` to a picture on this machine shows it under the paragraph that embeds it. Links to the web, and to files that are not there, draw nothing.
-- **What Claude names**: an answer that mentions a picture (`docs/media/leads.gif`, or just `leads.gif`) gets a chip beside the paragraph or list item that names it. Put the pointer on a chip and the picture opens in a card over the answer; move it off and the card closes; click it and the picture opens in the system's viewer. A name with no folder is looked for among the files under the working folder (`git ls-files`, ignored files left out); a name that matches no file gets no chip.
+- **What Claude names**: an answer that mentions a picture (`docs/media/leads.gif`, or just `leads.gif`) gets a chip beside the paragraph or list item that names it. Put the pointer on a chip and the picture opens in a card over the answer; move it off and the card closes. A name with no folder is looked for among the files under the working folder (`git ls-files`, ignored files left out); a name that matches no file gets no chip.
 
 <p align="center">
   <img src="docs/chips.png" alt="Illustration: an answer lists three pictures, a chip beside each; the pointer on the first chip opens its picture in a card over the rows above" width="760">
 </p>
 
 - **GIFs play** while they show on screen, each frame for its own delay; scrolled away, they stop on the frame they were on.
-- **A click on a picture** opens it in the system's default viewer (`open` on macOS, `explorer` on Windows and under WSL, `xdg-open` on Linux): the file it was read from, or, for the bytes Claude was sent, the mod's copy of them. Clicks need the fullscreen interface.
+- **A click on a picture or a chip**, with the **Open on click** option on (it is off by default), opens it in the system's default viewer (`open` on macOS, `explorer` on Windows and under WSL, `xdg-open` on Linux): the file it was read from, or, for the bytes Claude was sent, the mod's copy of them. Clicks need the fullscreen interface.
 
 ## How it draws
 
@@ -94,6 +94,7 @@ It answers with how pictures are drawn now. A reload of the mod keeps what it se
 | Play GIFs | on | Off, a GIF shows its first frame. |
 | Pictures in answers | on | Show the local pictures an answer embeds, and a chip for each one it names. |
 | Preview in a window | on | Where the terminal draws cells, a picture or a chip under the pointer opens at full quality in a window by the pointer. Off, the cells are all. |
+| Open on click | off | A click on a picture or a chip opens it in the system's default viewer. |
 
 ## Install
 

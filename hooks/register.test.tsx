@@ -341,7 +341,7 @@ test('a picture an answer only names gets a chip beside the block that names it,
   expect(await row.find({ type: 'Image' })).toBeUndefined()
 })
 
-test('the pointer on a chip opens its picture in a card over the answer; leaving closes it, a click opens the file', async ($, on) => {
+test('the pointer on a chip opens its picture in a card over the answer; leaving closes it, a click opens the file', { options: { click: true } }, async ($, on) => {
   const w = world(on, { files: { '/project/app/shot.png': PNG } })
   await startSession($)
   const row = await answer($, 'First.\n\nSecond.\n\nI saved it as shot.png.', 'a-1', { first: 0, last: 9, of: 10 })
@@ -635,7 +635,7 @@ test('an unfolded group of reads (--verbose, ctrl+o) shows its pictures under it
   expect(await row.find({ type: 'Text', text: 'a.png' })).toBeDefined()
 })
 
-test('a click on a picture drawn opens it in the system viewer: the file read, or the copy of the bytes Claude was sent', async ($, on) => {
+test('a click on a picture drawn opens it in the system viewer: the file read, or the copy of the bytes Claude was sent', { options: { click: true } }, async ($, on) => {
   const w = world(on, { files: { '/project/app/shot.png': PNG } })
   await startSession($)
   const click = async (row: Awaited<ReturnType<typeof resultRow>>) => {
@@ -648,6 +648,31 @@ test('a click on a picture drawn opens it in the system viewer: the file read, o
   expect(w.runs.filter(run => run.argv[0] === 'open').map(run => run.argv[1])).toEqual(['/project/app/shot.png'])
   await click(await resultRow($, 'tu-2', image(PNG)))
   expect(w.runs.filter(run => run.argv[0] === 'open').map(run => run.argv[1])[1]).toMatch(/\/inline-images\/s-1\/read-[0-9a-f]+\.source\.png$/)
+})
+
+test('by default a click opens nothing: a picture the terminal draws takes no region, and one in cells keeps its window', async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  expect(await (await resultRow($, 'tu-1', image(PNG))).findAll({ type: 'Client' })).toEqual([])
+  expect(w.runs.some(run => run.argv[0] === 'open')).toBe(false)
+})
+
+test('by default a click on a picture in cells, or on a chip, opens nothing', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  const region = (await row.findAll({ type: 'Client' })).find(client => String(client.key).startsWith('open:'))!
+  await row.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: String(region.key) })
+  await row.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: String(region.key) })
+  const answered = await answer($, 'Saved as shot.png.', 'a-1')
+  await answered.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: 'ref:0' })
+  await answered.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: 'ref:0' })
+  await w.clock.advance(50)
+  expect(w.runs.some(run => run.argv[0] === 'open')).toBe(false)
+  // The window stays: the pointer is still on the picture.
+  expect(w.shows.at(-1)!.verb).toBe('show')
 })
 
 test('off fullscreen there is no pointer: a picture takes no click region', async ($, on) => {
@@ -910,7 +935,7 @@ test('a PNG too large to send is sent as pixels, shrunk, with no converter', asy
   expect(w.runs.some(run => run.argv[0] === 'sips' || run.argv[0] === 'magick')).toBe(false)
 })
 
-test('on Windows the mod runs with PowerShell, not sh, and opens a picture with explorer', async ($, on) => {
+test('on Windows the mod runs with PowerShell, not sh, and opens a picture with explorer', { options: { click: true } }, async ($, on) => {
   const w = world(on, { env: { OS: 'Windows_NT', TEMP: 'C:/Users/me/AppData/Local/Temp' } })
   await startSession($)
   const row = await resultRow($, 'tu-1', image(PNG))
@@ -924,7 +949,7 @@ test('on Windows the mod runs with PowerShell, not sh, and opens a picture with 
   expect(w.runs.find(run => run.argv[0] === 'explorer')?.argv[1]).toMatch(/^C:\\Users\\me\\AppData\\Local\\Temp\\claude\\inline-images\\s-1\\read-[0-9a-f]+\.source\.png$/)
 })
 
-test("under WSL a picture opens in Windows' viewer, and converts with Windows' PowerShell where ImageMagick is missing", async ($, on) => {
+test("under WSL a picture opens in Windows' viewer, and converts with Windows' PowerShell where ImageMagick is missing", { options: { click: true } }, async ($, on) => {
   const jpeg = Uint8Array.of(0xff, 0xd8, 0xff, 0xe0).toBase64()
   const w = world(on, { uname: 'Linux', env: { WSL_DISTRO_NAME: 'Ubuntu', TERM_PROGRAM: 'vscode' }, files: { '/home/me/shot.jpg': jpeg }, sizes: { '/home/me/shot.jpg': { width: 64, height: 64 } }, missing: ['magick', 'convert', 'identify'] })
   await startSession($)
@@ -1044,7 +1069,8 @@ test('on Linux with no display, or over ssh, no window: the terminal shows the p
   const w = world(on, { uname: 'Linux', env: { TERM_PROGRAM: 'vscode' }, files: { '/home/me/shot.png': PNG } })
   await startSession($)
   await readRow($, 'tu-1', '/home/me/shot.png')
-  await resultRow($, 'tu-1', image(PNG))
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.findAll({ type: 'Client' })).toEqual([])
   await w.clock.advance(10)
   expect(w.windows).toHaveLength(0)
 })

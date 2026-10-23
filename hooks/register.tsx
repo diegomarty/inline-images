@@ -821,6 +821,8 @@ type Site = { ui: Ui; requestId: string; maxColumns: number; maxRows: number; is
 let optionRows = 12
 let maxRows = 12
 let animate = true
+// Whether a click on a picture or a chip opens it in the system's viewer (the Open on click option).
+let clickOpens = false
 let isOn = true
 const SIZE_ROWS = { small: 6, large: 24 }
 const START_VIEW: View = { isOn: true, size: 'medium' }
@@ -850,8 +852,9 @@ function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessag
     // Off screen (`null`) an animation stops; a surface that does not say counts as on screen.
     isShown: !('onScreen' in e.props) || e.props.onScreen !== null,
     animate,
-    // The pointer reaches a picture in fullscreen alone.
-    canPoint: e.viewport?.isFullscreen !== false
+    // The pointer reaches a picture in fullscreen alone; it is wanted there to open a window, or for
+    // a click where clicks open pictures.
+    canPoint: e.viewport?.isFullscreen !== false && (isWindowing() || clickOpens)
   }
 }
 
@@ -1127,6 +1130,7 @@ export const register: Register = (on, options) => {
   optionRows = Math.max(3, Math.min(60, Math.round(Number(options.rows ?? 12))))
   maxRows = optionRows
   animate = options.animate !== false
+  clickOpens = options.click === true
   const markdown = options.markdown !== false
 
   on('session.start', async ($, e, next) => {
@@ -1517,7 +1521,7 @@ export const register: Register = (on, options) => {
     if (opened !== undefined) {
       const data = e.data as { isOver?: unknown; isClicked?: unknown } | null
       const file = sourceFiles.get(opened)
-      if (data?.isClicked === true) {
+      if (data?.isClicked === true && clickOpens) {
         pointAt($, opened, false)
         if (file) void openFile($, file)
       } else if (isWindowing()) pointAt($, opened, data?.isOver === true)
@@ -1527,7 +1531,7 @@ export const register: Register = (on, options) => {
     if (!path) return result
     const data = e.data as { isOver?: unknown; isClicked?: unknown } | null
     const isThis = (now: Hovered | null) => now?.requestId === e.requestId && now.element === e.element
-    if (data?.isClicked === true) {
+    if (data?.isClicked === true && clickOpens) {
       pointAt($, `file:${path}`, false)
       void openFile($, path)
       await update($, hovered, () => null)
