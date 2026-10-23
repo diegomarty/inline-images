@@ -151,7 +151,7 @@ $image = [System.Drawing.Image]::FromFile($env:INLINE_IMAGES_PATH)
 $image.Dispose()`
 
 // Writes INLINE_IMAGES_PATH shrunk to INLINE_IMAGES_SIZE at most, never enlarged, as
-// INLINE_IMAGES_FORMAT (bmp or png) to INLINE_IMAGES_OUT. After Image Preview's converter.
+// INLINE_IMAGES_FORMAT (bmp, png or jpeg) to INLINE_IMAGES_OUT. After Image Preview's converter.
 const POWERSHELL_CONVERT = String.raw`
 Add-Type -AssemblyName System.Drawing
 $source = [System.Drawing.Image]::FromFile($env:INLINE_IMAGES_PATH)
@@ -164,7 +164,7 @@ $canvas.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQu
 $canvas.DrawImage($source, 0, 0, $width, $height)
 $canvas.Dispose()
 $source.Dispose()
-$format = if ($env:INLINE_IMAGES_FORMAT -eq 'png') { [System.Drawing.Imaging.ImageFormat]::Png } else { [System.Drawing.Imaging.ImageFormat]::Bmp }
+$format = switch ($env:INLINE_IMAGES_FORMAT) { 'png' { [System.Drawing.Imaging.ImageFormat]::Png } 'jpeg' { [System.Drawing.Imaging.ImageFormat]::Jpeg } default { [System.Drawing.Imaging.ImageFormat]::Bmp } }
 $picture.Save($env:INLINE_IMAGES_OUT, $format)
 $picture.Dispose()`
 
@@ -184,9 +184,10 @@ async function sizeWith ($: Engine, name: Tool, file: string) {
 
 /**
  * Writes `file` as `format` to `out`, its longest side shrunk to `side` pixels at most, never
- * enlarged (sips's -Z would enlarge a smaller one). Answers the picture's own size.
+ * enlarged (sips's -Z would enlarge a smaller one); a JPEG at quality 70. Answers the picture's own
+ * size.
  */
-export async function convert ($: Engine, file: string, out: string, format: 'png' | 'bmp', side: number) {
+export async function convert ($: Engine, file: string, out: string, format: 'png' | 'bmp' | 'jpeg', side: number) {
   for (const name of tool ? [tool] : TOOLS[system]) {
     const size = await sizeWith($, name, file)
     if (!size) continue
@@ -194,8 +195,8 @@ export async function convert ($: Engine, file: string, out: string, format: 'pn
     const result = name === 'powershell'
       ? await powershell($, POWERSHELL_CONVERT, { INLINE_IMAGES_PATH: file, INLINE_IMAGES_OUT: out, INLINE_IMAGES_SIZE: String(side), INLINE_IMAGES_FORMAT: format }, ['INLINE_IMAGES_PATH', 'INLINE_IMAGES_OUT']).catch(() => undefined)
       : await $.process.run(name === 'sips'
-        ? ['sips', '-s', 'format', format, ...(shrinks ? ['-Z', String(side)] : []), file, '--out', out]
-        : [name, `${file}[0]`, '-resize', `${side}x${side}>`, `${format === 'bmp' ? 'BMP3' : 'PNG'}:${out}`]).catch(() => undefined)
+        ? ['sips', '-s', 'format', format, ...(format === 'jpeg' ? ['-s', 'formatOptions', '70'] : []), ...(shrinks ? ['-Z', String(side)] : []), file, '--out', out]
+        : [name, `${file}[0]`, '-resize', `${side}x${side}>`, ...(format === 'jpeg' ? ['-quality', '70'] : []), `${{ bmp: 'BMP3', png: 'PNG', jpeg: 'JPG' }[format]}:${out}`]).catch(() => undefined)
     if (result?.exitCode === 0) {
       tool = name
       return size
