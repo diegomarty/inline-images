@@ -359,7 +359,7 @@ async function loadStill ($: Engine, key: string, file: string, head: Uint8Array
   // and ImageMagick or not. One that cannot be (too large) goes on to the converter.
   const own = pngSize(head)
   if (own && isPng(head) && graphics !== 'file') {
-    const decoded = await bytesOf($, file, bytes).then(all => [all, decodePng(all)] as const, () => undefined)
+    const decoded = await bytesOf($, file, bytes).then(all => [all, decodePng(all)] as const).catch(() => undefined)
     if (decoded) {
       const [all, pixels] = decoded
       const picture = { width: own.width, height: own.height, frames: 1 }
