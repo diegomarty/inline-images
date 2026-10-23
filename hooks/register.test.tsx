@@ -1022,3 +1022,42 @@ test('in cells a picture takes half the rows', async ($, on) => {
   const row = await resultRow($, 'tu-1', image(square.toBase64()))
   expect(await row.find({ type: 'Raster' })).toMatchObject({ props: { rows: 6 } })
 })
+
+// --- The VS Code extension, the desktop and mobile apps: an Svg holding the picture.
+
+const remote = ($: Engine, surface: 'vscode' | 'desktop' | 'mobile', text: string, requestId = 'a-1') =>
+  $.ui.mount({ plugin: 'inline-images', surface, component: 'AssistantMessage', requestId, props: { text, isFirstOfReply: true } })
+
+test('in the VS Code extension a picture an answer names shows under it, in an Svg, its own bytes inside', async ($, on) => {
+  const w = world(on, { files: { '/project/app/docs/shot.png': PNG } })
+  await startSession($)
+  await remote($, 'vscode', 'Saved as `docs/shot.png`.', 'a-0')
+  await w.clock.advance(10)
+  const row = await remote($, 'vscode', 'Saved as `docs/shot.png`.')
+  // The answer is the engine's own drawing; the picture is under it.
+  expect(await row.find({ key: 'engine' })).toBeDefined()
+  expect(await row.find({ type: 'Svg' })).toMatchObject({ props: { alt: 'shot.png', width: 1, height: 1, source: expect.stringContaining(`href="data:image/png;base64,${PNG}"`) } })
+  expect(await row.find({ type: 'Text', text: 'docs/shot.png' })).toBeDefined()
+})
+
+test('in the desktop app a picture too large for an Svg is shrunk to a JPEG that fits', async ($, on) => {
+  const big = padded(PNG, 200_000)
+  const w = world(on, { files: { '/project/app/big.png': big }, sizes: { '/project/app/big.png': { width: 3000, height: 2000 } } })
+  await startSession($)
+  await remote($, 'desktop', 'See ![chart](big.png).', 'a-0')
+  await w.clock.advance(10)
+  const row = await remote($, 'desktop', 'See ![chart](big.png).')
+  expect(await row.find({ type: 'Svg' })).toMatchObject({ props: { alt: 'big.png', source: expect.stringContaining('href="data:image/jpeg;base64,') } })
+  expect(w.runs.find(run => run.argv[0] === 'sips' && run.argv[1] === '-s')?.argv).toEqual(expect.arrayContaining(['jpeg', 'formatOptions', '70', '-Z', '1200']))
+})
+
+test('in a remote app a picture that is not there draws nothing, and an answer that names none is left alone', async ($, on) => {
+  const w = world(on)
+  await startSession($)
+  await remote($, 'mobile', 'Saved as `gone.png`.', 'a-0')
+  await w.clock.advance(10)
+  const missing = await remote($, 'mobile', 'Saved as `gone.png`.')
+  expect(await missing.find({ type: 'Svg' })).toBeUndefined()
+  const plain = await remote($, 'vscode', 'No pictures here.', 'a-2')
+  expect(await plain.find({ type: 'Svg' })).toBeUndefined()
+})

@@ -64,6 +64,10 @@ There is no window over ssh (it would open on the other machine), on Linux witho
 
 `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` sends the bytes to a terminal Claude Code does not know draws pictures, shrunk to 1024 pixels and 2 MB.
 
+### The VS Code extension, the desktop and mobile apps
+
+The VS Code extension's panel and the desktop app draw what Claude reads and what you paste themselves; what they cannot draw is a picture from this machine's files. So there the mod draws the local pictures an answer embeds (`![alt](path)`) or names (`docs/media/demo.gif`, or just `demo.gif`) under the answer, each named, side by side; the answer itself is drawn by the app, as ever. Each picture is an Svg holding it as a data URI: a PNG or GIF small enough goes as it is (a GIF keeps playing), any other is shrunk to a JPEG till it fits, drawn 480 points wide at most. Shrinking needs a converter (`sips` on macOS, PowerShell on Windows, ImageMagick on Linux).
+
 <p align="center">
   <img src="docs/pixels-and-cells.png" alt="Illustration: the same picture under a Read row, in pixels in Ghostty and kitty, and in colored cells in any other terminal with true color" width="760">
 </p>
@@ -134,6 +138,7 @@ One hooks module ([`hooks/register.tsx`](hooks/register.tsx)), a GIF decoder ([`
 
 - An `AbovePrompt` hook draws the draft's strip from a list of its `[Image #N]`, kept by `prompt.edit` (a key, a paste) and `prompt.change` (every other change of the box: a recalled entry, a submit or a clear, a plugin's fill).
 - `ui.render` hooks on `ToolResult` and `ToolGroup` (Read calls whose output is an image), `UserMessage` (the `[Image #N]` of a sent prompt) and `AssistantMessage` (markdown images, and the pictures an answer names) draw the engine's row, then the pictures or chips under it.
+- On the VS Code extension, the desktop and mobile apps, which have no `Image`, an `AssistantMessage` hook draws the answer's local pictures under the app's own drawing of it, each an `Svg` with the picture inside as a data URI.
 - Where the terminal draws cells, a picture or a chip under the pointer starts a window's program ([`hooks/window.ts`](hooks/window.ts)) with `$.process.spawn`, told the picture, its largest side and how long it may stay. It says `shown` once the window is up, then a `.` every tenth of a second, so the mod wakes to end it when the pointer leaves: it stops reading, and the program ends.
 - Each chip is a `Client` ([`hooks/chip.tsx`](hooks/chip.tsx), as in Image Preview) that posts when the pointer comes onto it, leaves it and clicks it; a `ui.message` hook keeps which chip has the pointer, and the answer draws the card last, `position: "absolute"`, over the rows above the chip's block (or below it, where the rows above are too few), so nothing moves under the pointer and no block paints over it. Where each block is comes from a probe in it ([`hooks/probe.tsx`](hooks/probe.tsx)), an unpainted `Client` as tall as its block, that says how many rows it was laid out in.
 - Each picture is read once, in the background: a GIF is decoded into frames ([`hooks/gif.ts`](hooks/gif.ts)) and each written to a raw RGBA file; a PNG is drawn from its file, or decoded ([`hooks/png.ts`](hooks/png.ts), with its own inflate) to be drawn in cells or sent as pixels; any other picture from a PNG or BMP a converter writes. What it asks of the system (folders, bytes, conversions, the viewer) goes through [`hooks/system.ts`](hooks/system.ts), a way for each system. The rows that wait on it draw again.

@@ -50,6 +50,13 @@ const CELL_PIXELS = 8
 const STILL_PIXELS = 1600
 const VIEW_PIXELS = 1024
 const VIEW_BYTES = 2 * 1024 * 1024
+// A picture an Svg draws (the VS Code extension, the desktop and mobile apps, which have no Image)
+// holds it as a data URI in its markup, 131072 characters at most: what its bytes may take, how
+// wide it is drawn at most, in CSS pixels, and the sides a larger one is shrunk to, as a JPEG, till
+// it fits.
+const SVG_DATA = 120000
+const SVG_WIDTH = 480
+const SVG_SIDES = [1200, 900, 640, 480, 320]
 // A picture's window: its longest side at most, in points, and how many seconds at most it stays.
 const WINDOW_SIZE = 800
 const WINDOW_LIFE = 120
@@ -113,6 +120,10 @@ const loaded = new Budget<Loaded>(LOADED_BUDGET, key => forget(key), key => isIn
 const drawnAt = new Map<string, number>()
 const isInUse = (key: string) => Date.now() - (drawnAt.get(key) ?? -Infinity) < DRAWN_MS || [...playing.values()].some(play => play.key === key)
 const loading = new Set<string>()
+// Each picture an Svg draws, by its file: a data URI and its size, or why there is none.
+type Href = { href: string; width: number; height: number } | { error: string }
+const hrefs = new Map<string, Href>()
+const hrefLoading = new Set<string>()
 // The pictures that could not be read, by key, and when: not tried again on every redraw.
 const failed = new Map<string, number>()
 // Which session the mod reads for: a load started in an earlier one keeps nothing it read.
@@ -262,6 +273,7 @@ function reset () {
   sourceFiles.clear()
   openers.clear()
   drawnAt.clear()
+  hrefs.clear()
   index = undefined
 }
 
@@ -399,6 +411,62 @@ async function bytesOf ($: Engine, file: string, size?: number) {
   const bytes = new Uint8Array(size)
   for (let at = 0; at < size; at += PIECE_BYTES) bytes.set((await readBytes($, file, at, PIECE_BYTES)).subarray(0, size - at), at)
   return bytes
+}
+
+/** A GIF's width and height, from its header. */
+function gifSize (bytes: Uint8Array) {
+  if (!isGif(bytes) || bytes.length < 10) return undefined
+  return { width: bytes[6]! | (bytes[7]! << 8), height: bytes[8]! | (bytes[9]! << 8) }
+}
+
+/**
+ * Reads a picture once as an Svg draws it: a PNG or GIF small enough as its own bytes (a GIF keeps
+ * playing), any other as a JPEG shrunk till it fits the Svg's markup. The drawings that wait on it
+ * draw again.
+ */
+async function loadHref ($: Engine, file: string) {
+  const key = `svg:${file}`
+  if (hrefs.has(key) || hrefLoading.has(key)) return
+  hrefLoading.add(key)
+  const mine = epoch
+  let made: Href
+  try {
+    const stat = await $.fs.stat(file).catch(() => {
+      throw new Error('not found')
+    })
+    const head = await readBytes($, file, 0, 32)
+    const own = pngSize(head) ?? gifSize(head)
+    const type = isPng(head) ? 'png' : isGif(head) ? 'gif' : undefined
+    if (type && own && Math.ceil(stat.size / 3) * 4 <= SVG_DATA) {
+      made = { href: `data:image/${type};base64,${(await bytesOf($, file, stat.size)).toBase64()}`, ...own }
+    } else {
+      const out = `${await cacheFolder($)}/${nameOf(key)}`
+      let found: Href | undefined
+      for (const side of SVG_SIDES) {
+        const size = await convert($, file, `${out}-${side}.jpg`, 'jpeg', side)
+        const bytes = await bytesOf($, `${out}-${side}.jpg`)
+        if (Math.ceil(bytes.length / 3) * 4 > SVG_DATA) continue
+        found = { href: `data:image/jpeg;base64,${bytes.toBase64()}`, width: size.width, height: size.height }
+        break
+      }
+      made = found ?? { error: 'too large to show' }
+    }
+  } catch (error) {
+    made = { error: messageOf(error) }
+  } finally {
+    hrefLoading.delete(key)
+  }
+  if (mine !== epoch) return
+  hrefs.set(key, made)
+  const picture: Picture = 'error' in made ? made : { width: made.width, height: made.height, frames: 1 }
+  await update($, pictures, all => ({ ...all, [key]: picture })).catch(() => undefined)
+}
+
+/** The markup of an Svg drawing a picture at its own shape, SVG_WIDTH CSS pixels wide at most. */
+function svgOf ({ href, width, height }: { href: string; width: number; height: number }) {
+  const w = Math.min(SVG_WIDTH, width)
+  const h = Math.max(1, Math.round((height * w) / width))
+  return { source: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><image width="${w}" height="${h}" href="${href}"/></svg>`, width: w, height: h }
 }
 
 /** A whole number that changes when the file does: what tells the terminal to read it again. */
@@ -1128,8 +1196,46 @@ export const register: Register = (on, options) => {
     noteRow(e.requestId)
     settle(e)
     if (!isOn) return next(e)
-    if (!markdown || e.surface !== 'terminal') return next(e)
+    if (!markdown) return next(e)
     const text = e.props.text
+    // The VS Code extension, the desktop and mobile apps draw what Claude reads and what you paste
+    // themselves, and no picture from this machine's files: the ones an answer embeds or names are
+    // drawn under it, each an Svg holding the picture, named.
+    if (e.surface !== 'terminal') {
+      if (!/\.(png|jpe?g|gif|webp|bmp|tiff?|heic)\b/i.test(text)) return next(e)
+      await follow($)
+      const cwd = await $.session.cwd()
+      const home = await $.env.get('HOME')
+      const embedded = embeddedIn(text).flatMap(target => absolute(target, cwd, home) ?? [])
+      const files = [...new Set([...embedded, ...(await namedIn($, `${e.requestId}#all`, text, cwd))])]
+      if (files.length === 0) return next(e)
+      for (const file of files) void loadHref($, file)
+      const all = await read($, pictures)
+      const { Box, Svg, Text } = $.ui.resolve(e)
+      const drawn: RenderElement[] = []
+      for (const file of files) {
+        const made = hrefs.get(`svg:${file}`)
+        const picture = all[`svg:${file}`]
+        if (picture && 'error' in picture && picture.error === 'not found') continue
+        const name = file.startsWith(`${cwd}/`) ? file.slice(cwd.length + 1) : file
+        const shown = made && !('error' in made) ? svgOf(made) : undefined
+        drawn.push(
+          <Box key={`svg:${file}`} flexDirection="column">
+            {shown
+              ? <Svg source={shown.source} alt={baseName(file)} width={shown.width} height={shown.height} />
+              : <Text dimColor>{made && 'error' in made ? `${baseName(file)}: no preview, ${made.error}` : `${baseName(file)} loading…`}</Text>}
+            <Text dimColor size="caption">{name}</Text>
+          </Box>
+        )
+      }
+      if (drawn.length === 0) return next(e)
+      return (
+        <Box flexDirection="column">
+          {await next(e)}
+          <Box flexDirection="row" flexWrap="wrap" columnGap={2} rowGap={1}>{drawn}</Box>
+        </Box>
+      )
+    }
     // A cheap look first: most answers name no picture at all.
     if (!/\.(png|jpe?g|gif|webp|bmp|tiff?|heic)\b/i.test(text)) return next(e)
     await follow($)
