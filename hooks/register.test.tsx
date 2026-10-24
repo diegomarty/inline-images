@@ -40,6 +40,28 @@ function bmp (color: number) {
   return bytes.toBase64()
 }
 
+/**
+ * A PNG of a palette, `width` by `height`, every pixel index 0, its deflate blocks stored; with a
+ * tRNS chunk (index 0 see-through) where `isSeeThrough`.
+ */
+function palettePng (width: number, height: number, isSeeThrough: boolean) {
+  const raw = new Uint8Array((width + 1) * height)
+  const blocks: number[] = [0x78, 0x01]
+  for (let at = 0; at < raw.length; at += 65535) {
+    const length = Math.min(65535, raw.length - at)
+    blocks.push(at + length >= raw.length ? 1 : 0, length & 0xff, length >> 8, ~length & 0xff, (~length >> 8) & 0xff)
+    for (let i = 0; i < length; i++) blocks.push(0)
+  }
+  // Adler-32 of zeros: a is 1, b is the count.
+  const b = raw.length % 65521
+  blocks.push(b >> 8, b & 0xff, 0, 1)
+  const table = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0 })
+  const crc = (bytes: number[]) => { let c = 0xffffffff; for (const byte of bytes) c = table[(c ^ byte) & 0xff]! ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0 }
+  const u32 = (n: number) => [24, 16, 8, 0].map(s => (n >>> s) & 0xff)
+  const chunk = (type: string, body: number[]) => { const head = [...type].map(c => c.charCodeAt(0)); return [...u32(body.length), ...head, ...body, ...u32(crc([...head, ...body]))] }
+  return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...chunk('IHDR', [...u32(width), ...u32(height), 8, 3, 0, 0, 0]), ...chunk('PLTE', [255, 255, 255]), ...(isSeeThrough ? chunk('tRNS', [0]) : []), ...chunk('IDAT', blocks), ...chunk('IEND', [])]).toBase64()
+}
+
 const FOUR_MIB = 4 * 1024 * 1024
 const decoded = (base64: string) => Uint8Array.fromBase64(base64)
 
@@ -1395,5 +1417,26 @@ test('pressed on a picture, dragged off it and let go outside, the window closes
   await row.pointer({ type: 'up', x: -3, y: -2, button: 'left', in: region })
   await w.clock.advance(50)
   expect(w.shows.at(-1)!.verb).toBe('hide')
+})
+
+
+test('a large PNG with see-through pixels drawn in cells is decoded here, keeping them: the converter\'s BMP has no alpha', async ($, on) => {
+  const logo = palettePng(1001, 1000, true)
+  const w = world(on, { env: CELLS, files: { '/project/app/logo.png': logo } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/logo.png')
+  const row = await resultRow($, 'tu-1', image(logo))
+  expect(await row.find({ type: 'Raster' })).toBeDefined()
+  expect(w.runs.some(run => run.argv[0] === 'sips' && run.argv.includes('bmp'))).toBe(false)
+})
+
+test('a palette PNG with a see-through colour too large for an Svg is shrunk to a PNG, not a JPEG', async ($, on) => {
+  const logo = palettePng(400, 400, true)
+  const w = world(on, { files: { '/project/app/logo.png': logo } })
+  await startSession($)
+  await remote($, 'desktop', 'See ![logo](logo.png).', 'a-0')
+  await w.clock.advance(10)
+  const row = await remote($, 'desktop', 'See ![logo](logo.png).')
+  expect(await row.find({ type: 'Svg' })).toMatchObject({ props: { source: expect.stringContaining('href="data:image/png;base64,') } })
 })
 

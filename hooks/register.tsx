@@ -541,6 +541,23 @@ async function headOf ($: Engine, file: string) {
   return readBytes($, file, 0, 32)
 }
 
+/**
+ * Whether a PNG has what is see-through: an alpha channel (colour types 4 and 6), or a tRNS chunk
+ * (a palette's, a grey's or a colour's one transparent value), found among the chunks before its
+ * pixels (`all` its bytes where read, else its first 64 KiB).
+ */
+async function isSeeThrough ($: Engine, file: string, head: Uint8Array, all?: Uint8Array) {
+  if (head[25] === 4 || head[25] === 6) return true
+  const bytes = all ?? (await readBytes($, file, 0, 65536).catch(() => head))
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  for (let at = 8; at + 8 <= bytes.length; at += 12 + view.getUint32(at)) {
+    const type = String.fromCharCode(...bytes.subarray(at + 4, at + 8))
+    if (type === 'tRNS') return true
+    if (type === 'IDAT') return false
+  }
+  return false
+}
+
 /** A whole file's bytes: in one read under 4 MiB, past that in pieces, each through base64. */
 async function bytesOf ($: Engine, file: string, size?: number) {
   size ??= (await $.fs.stat(file)).size
@@ -569,7 +586,7 @@ async function loadHref ($: Engine, key: string, file: string, head: Uint8Array,
     const bytes = all ?? await bytesOf($, file, size)
     return [{ ...own, frames: 1 }, { href: { href: `data:image/${type};base64,${bytes.toBase64()}`, ...own }, delays: [0] }]
   }
-  const format = isPng(head) && (head[25] === 4 || head[25] === 6) ? 'png' : 'jpeg'
+  const format = isPng(head) && (await isSeeThrough($, file, head, all)) ? 'png' : 'jpeg'
   const out = `${await cacheFolder($)}/${nameOf(key)}.svg.${format === 'png' ? 'png' : 'jpg'}`
   let measured = own
   let side = SVG_SIDE
@@ -632,7 +649,8 @@ async function loadStill ($: Engine, key: string, file: string, head: Uint8Array
       return [picture, { sources: [{ png: (all ?? await bytesOf($, file, bytes)).toBase64() }], delays: [0] }]
     }
     // A large one drawn in cells is shrunk by a converter where there is one: quicker than here.
-    if (graphics === 'none' && own.width * own.height > DECODE_PIXELS) {
+    // Not one with what is see-through: the converter's BMP has no alpha.
+    if (graphics === 'none' && own.width * own.height > DECODE_PIXELS && !(await isSeeThrough($, file, head, all))) {
       const isConverted = await convert($, file, `${out}.bmp`, 'bmp', CELL_SOURCE_PIXELS, own).then(() => true, () => false)
       if (isConverted) return [picture, { pixels: [parseBmp(await bytesOf($, `${out}.bmp`))], delays: [0] }]
     }
