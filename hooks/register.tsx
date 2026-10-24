@@ -721,8 +721,11 @@ async function loadFrom ($: Engine, key: string, origin: Origin): Promise<Read> 
     size = Math.floor((origin.base64.length * 3) / 4)
   }
   const version = `@${mtime}`
-  // A file small enough is read once, in the engine, its header taken from it: no process for it.
-  const all = size < READ_LIMIT ? await bytesOf($, file, size) : undefined
+  // A file small enough is read once, in the engine, its header taken from it: where its bytes are
+  // wanted. Ghostty and kitty are handed a still's path (a GIF's frames are decoded here, read then);
+  // an Svg holds the bytes of a PNG or GIF small enough alone.
+  const isWanted = key.startsWith('svg:') ? Math.ceil(size / 3) * 4 <= SVG_DATA : graphics !== 'file'
+  const all = size < READ_LIMIT && isWanted ? await bytesOf($, file, size) : undefined
   const head = all ? all.subarray(0, 32) : await headOf($, file)
   const [picture, value] = key.startsWith('svg:')
     ? await loadHref($, key, file, head, all, size)

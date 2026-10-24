@@ -655,7 +655,7 @@ test("a chip's picture is read before the pointer comes onto it", async ($, on) 
   await startSession($)
   await answer($, 'Saved as shot.png.', 'a-1')
   await w.clock.advance(10)
-  expect(w.reads).toContain('/project/app/shot.png')
+  expect(w.runs.some(run => run.argv[2]?.startsWith('head -c') && run.argv[3] === '/project/app/shot.png')).toBe(true)
 })
 
 // --- Pictures in the unfolded view, and a click on one.
@@ -1300,7 +1300,7 @@ test('a large PNG drawn in cells is shrunk by the converter, not decoded here', 
 })
 
 test("a small file's header is taken from the one read of it: no process to read it", async ($, on) => {
-  const w = world(on, { files: { '/project/app/shot.png': PNG } })
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
   await startSession($)
   await readRow($, 'tu-1', '/project/app/shot.png')
   await resultRow($, 'tu-1', image(PNG))
@@ -1419,7 +1419,6 @@ test('pressed on a picture, dragged off it and let go outside, the window closes
   expect(w.shows.at(-1)!.verb).toBe('hide')
 })
 
-
 test('a large PNG with see-through pixels drawn in cells is decoded here, keeping them: the converter\'s BMP has no alpha', async ($, on) => {
   const logo = palettePng(1001, 1000, true)
   const w = world(on, { env: CELLS, files: { '/project/app/logo.png': logo } })
@@ -1440,3 +1439,11 @@ test('a palette PNG with a see-through colour too large for an Svg is shrunk to 
   expect(await row.find({ type: 'Svg' })).toMatchObject({ props: { source: expect.stringContaining('href="data:image/png;base64,') } })
 })
 
+test('Ghostty and kitty are handed a still by its path: the file is never read whole', async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { file: '/project/app/shot.png' } } })
+  expect(w.reads).not.toContain('/project/app/shot.png')
+})
