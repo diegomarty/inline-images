@@ -120,11 +120,13 @@ type Host = {
   commands: string
   number: number
   isReady: boolean
+  isEnded: boolean
   next?: string
   isWriting: boolean
   shows: Map<number, string>
 }
 let host: Host | undefined
+let hostStarting: Promise<Host | undefined> | undefined
 let hostStarts = 0
 // The picture the window is for (up, or on its way), and the one under the pointer.
 let windowKey: string | undefined
@@ -317,16 +319,33 @@ function settle (e: { surface: string; viewport?: { isFullscreen?: boolean } }) 
 
 /**
  * Starts the window's program: one for the session, started before the pointer comes, as it takes a
- * while to (PowerShell's above all). It shows one picture at a time, told in a file.
+ * while to (PowerShell's above all). It shows one picture at a time, told in a file. Asked again
+ * while it starts, the same start answers.
  */
-async function startHost ($: Engine) {
-  if (host) return host
-  if (!canWindow || hostStarts >= WINDOW_STARTS) return undefined
+function startHost ($: Engine) {
+  if (host) return Promise.resolve(host)
+  return (hostStarting ??= launchHost($).finally(() => {
+    hostStarting = undefined
+  }))
+}
+
+async function launchHost ($: Engine) {
+  if (!canWindow) return undefined
+  // Ended on its own too often: the cells are all.
+  if (hostStarts >= WINDOW_STARTS) {
+    canWindow = false
+    $.ui.log(`inline-images: no window (its program ended ${WINDOW_STARTS} times); the terminal shows the pictures`, { to: 'debug' })
+    return undefined
+  }
   hostStarts++
-  const commands = `${await cacheFolder($)}/window.txt`
+  const mine = epoch
+  // A file of its own: a program a reload left behind, still reading the last one, is told nothing.
+  const commands = `${await cacheFolder($)}/window-${Date.now().toString(36)}.txt`
   await $.fs.write(commands, '')
-  if (host) return host
-  const started: Host = { stream: $.process.spawn(await windowCommand($, commands, WINDOW_SIZE)), commands, number: 0, isReady: false, isWriting: false, shows: new Map() }
+  const command = await windowCommand($, commands, WINDOW_SIZE)
+  // The session ended meanwhile: its program is not started.
+  if (mine !== epoch) return undefined
+  const started: Host = { stream: $.process.spawn(command), commands, number: 0, isReady: false, isEnded: false, isWriting: false, shows: new Map() }
   host = started
   void readHost($, started)
   return started
@@ -372,26 +391,18 @@ async function readHost ($: Engine, running: Host) {
 }
 
 /**
- * Tells the window's program to show a picture (its path in the program's form, none while it is
- * made, and its size where known), to hide the window, or to end; started first to show one. Told
- * in order: what is told while a write is on its way is written after it, the latest alone.
+ * Writes a command to the window's program's file. In order: what is sent while a write is on its
+ * way is written after it, the latest alone; nothing after its `quit`.
  */
-async function tell ($: Engine, verb: 'show' | 'hide' | 'quit', key?: string, path = '', width = 0, height = 0) {
-  const running = verb === 'show' ? await startHost($) : host
-  if (!running) return
-  const number = ++running.number
-  if (key !== undefined) {
-    running.shows.set(number, key)
-    if (running.shows.size > MAX_KNOWN) running.shows.delete(running.shows.keys().next().value!)
-  }
-  running.next = `${number}\n${verb}\n${path}\n${width}\n${height}\nend\n`
+async function send ($: Engine, running: Host, text: string) {
+  running.next = text
   if (running.isWriting) return
   running.isWriting = true
   try {
     while (running.next !== undefined) {
-      const text = running.next
+      const next = running.next
       running.next = undefined
-      await $.fs.write(running.commands, text)
+      await $.fs.write(running.commands, next)
     }
   } finally {
     running.isWriting = false
@@ -399,9 +410,27 @@ async function tell ($: Engine, verb: 'show' | 'hide' | 'quit', key?: string, pa
 }
 
 /**
+ * Tells the window's program to show a picture (its path in the program's form, none while it is
+ * made, and its size where known), or to hide the window; started first to show one. A show for a
+ * picture the window is no longer for (the pointer left, or went on to another) is not sent: it
+ * would come after the hide meant to undo it.
+ */
+async function tell ($: Engine, verb: 'show' | 'hide', key?: string, path = '', width = 0, height = 0) {
+  const running = verb === 'show' ? await startHost($) : host
+  if (!running || running.isEnded || (verb === 'show' && windowKey !== key)) return
+  const number = ++running.number
+  if (key !== undefined) {
+    running.shows.set(number, key)
+    if (running.shows.size > MAX_KNOWN) running.shows.delete(running.shows.keys().next().value!)
+  }
+  await send($, running, `${number}\n${verb}\n${path}\n${width}\n${height}\nend\n`)
+}
+
+/**
  * Shows picture `key` (from `file`, or the file it was read from) in the window by the pointer:
  * the window opens at once, a spinner in it where the picture takes a moment (one the window cannot
- * read is made a PNG first), and the picture fills it.
+ * read is made a PNG first), and the picture fills it. One with nothing the window can show (no
+ * file, no PNG made of it, no path the program reads) is left to the terminal.
  */
 async function openWindow ($: Engine, key: string, given?: string) {
   if (pointerOn !== key || noWindow.has(key) || windowKey === key) return
@@ -409,18 +438,16 @@ async function openWindow ($: Engine, key: string, given?: string) {
   const picture = (await read($, pictures))[key]
   const [width, height] = picture && 'width' in picture ? [picture.width, picture.height] : [0, 0]
   let file = given ?? sourceFiles.get(key)
-  const isReadable = file !== undefined && windowReads(file)
-  await tell($, 'show', key, isReadable ? await windowPath($, file!) : '', width, height)
-  if (isReadable) return
   // A picture the system's window cannot read (Tk reads PNG and GIF; System.Drawing no WebP) is
-  // shown a PNG of it.
-  if (file) {
+  // shown a PNG of it, the window open with its spinner meanwhile.
+  if (file && !windowReads(file)) {
+    await tell($, 'show', key, '', width, height)
     const out = `${await cacheFolder($)}/${nameOf(key)}.window.png`
     file = await convert($, file, out, 'png', WINDOW_SIZE).then(() => out, () => undefined)
   }
-  if (windowKey !== key) return
   const path = file && (await windowPath($, file))
   if (path) return tell($, 'show', key, path, width, height)
+  if (windowKey !== key) return
   noWindow.add(key)
   windowKey = undefined
   await tell($, 'hide')
@@ -441,8 +468,10 @@ async function stopHost ($: Engine) {
   pointerOn = undefined
   hostStarts = 0
   if (!running) return
-  // Told to end (a program under WSL outlives its stream), and its stream ended.
-  await $.fs.write(running.commands, `${running.number + 1}\nquit\n\n0\n0\nend\n`).catch(() => undefined)
+  // Told to end, after what is on its way and with nothing after (a program under WSL outlives its
+  // stream), and its stream ended.
+  running.isEnded = true
+  await send($, running, `${running.number + 1}\nquit\n\n0\n0\nend\n`).catch(() => undefined)
   void running.stream.return(undefined as never)?.catch(() => undefined)
 }
 
@@ -1164,9 +1193,11 @@ export const register: Register = (on, options) => {
     // The draft as it stands; edits and every other change of the box follow from here.
     await track($, (await $.prompt.read()).text)
     await $.command.register({ name: 'images', description: 'Inline Images: turn the pictures on or off, or set their size', argumentHint: 'on | off | small | medium | large', immediate: true })
-    // The window's program, started now so the first picture under the pointer opens at once
-    // (iTerm2's, once its first drawing says it draws cells).
-    if (isWindowing() && !isItermPending) void startHost($).catch(() => undefined)
+    // The window's program, started now so the first picture under the pointer opens at once: in
+    // the fullscreen interface alone, the one with a pointer (elsewhere, at the first hover there is
+    // ever one; iTerm2's once its first drawing says it draws cells).
+    const tui = await $.settings.read().then(settings => settings.tui, () => undefined)
+    if (isWindowing() && !isItermPending && tui === 'fullscreen') void startHost($).catch(() => undefined)
     return result
   })
 
@@ -1538,7 +1569,7 @@ export const register: Register = (on, options) => {
       return result
     }
     // Where the terminal draws cells, the chip's picture opens in a window, not a card of cells.
-    if (isWindowing()) {
+    if (isWindowing() && !noWindow.has(`file:${path}`)) {
       pointAt($, `file:${path}`, data?.isOver === true, path)
       return result
     }

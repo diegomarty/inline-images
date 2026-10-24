@@ -10,6 +10,8 @@ const REPEAT_MS = 50
 
 const Chip: ClientModule<Props, { isOver: boolean; isPressed?: boolean }> = (props, surface) => {
   const label = props?.label
+  // Above or left of the region is outside it; below or right says nothing in one not laid out yet (0 by 0).
+  const isInside = (x: number, y: number) => x >= 0 && y >= 0 && (surface.columns === 0 || (x < surface.columns && y < surface.rows))
   surface.onPointer(event => {
     // A click is the left button let go over the chip it went down on.
     if (event.type === 'down') {
@@ -17,14 +19,16 @@ const Chip: ClientModule<Props, { isOver: boolean; isPressed?: boolean }> = (pro
       return
     }
     if (event.type === 'up') {
-      // A region not laid out yet (0 by 0) says nothing of where the pointer is.
-      const isInside = surface.columns === 0 || (event.x >= 0 && event.y >= 0 && event.x < surface.columns && event.y < surface.rows)
-      if (surface.state?.isPressed && isInside) surface.post({ isOver: true, isClicked: true })
-      surface.setState({ isOver: isInside })
+      const isOver = isInside(event.x, event.y)
+      // Let go outside, after a press held the pointer here: it left.
+      if (surface.state?.isPressed && isOver) surface.post({ isOver: true, isClicked: true })
+      else if (!isOver) surface.post({ isOver: false })
+      surface.setState({ isOver })
       return
     }
-    // A move over the chip says so again: a card hidden while the pointer stayed comes back.
-    const isOver = event.type !== 'leave'
+    // A move over the chip says so again: a card hidden while the pointer stayed comes back. One
+    // held here by a press reports moves outside it too: those say it left.
+    const isOver = event.type !== 'leave' && (event.type === 'enter' || isInside(event.x, event.y))
     surface.post({ isOver })
     if (isOver !== (surface.state?.isOver ?? false)) surface.setState({ isOver, isPressed: surface.state?.isPressed })
     // Going straight from one chip to the next, the leave and the enter post in one frame, and the
