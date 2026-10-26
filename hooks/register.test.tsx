@@ -144,14 +144,14 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
       const size = sizes[argv.at(-1)!] ?? { width: 1, height: 1 }
       return ok(`${argv.at(-1)}\n  pixelWidth: ${size.width}\n  pixelHeight: ${size.height}\n`)
     }
-    // ImageMagick: `magick identify` (or `identify`) tells a size; `magick` (or `convert`) writes `PNG:out` or `BMP3:out`.
+    // ImageMagick: `magick identify` (or `identify`) tells a size; `magick` (or `convert`) writes `PNG:out` or `BMP:out`.
     if ((argv[0] === 'magick' && argv[1] === 'identify') || argv[0] === 'identify') {
       const size = sizes[argv.at(-1)!.replace(/\[0\]$/, '')] ?? { width: 1, height: 1 }
       return ok(`${size.width} ${size.height}`)
     }
     if (argv[0] === 'magick' || argv[0] === 'convert') {
       const [format, out] = argv.at(-1)!.split(/:(.*)/) as [string, string]
-      files[out] = format === 'BMP3' ? bmp(0xff0000) : PNG
+      files[out] = format === 'BMP' ? bmp(0xff0000) : PNG
       return ok()
     }
     if (argv[0] === 'sips') {

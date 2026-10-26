@@ -200,7 +200,9 @@ export async function convert ($: Engine, file: string, out: string, format: 'pn
       ? await powershell($, POWERSHELL_CONVERT, { INLINE_IMAGES_PATH: file, INLINE_IMAGES_OUT: out, INLINE_IMAGES_SIZE: String(side), INLINE_IMAGES_FORMAT: format }, ['INLINE_IMAGES_PATH', 'INLINE_IMAGES_OUT']).catch(() => undefined)
       : await $.process.run(name === 'sips'
         ? ['sips', '-s', 'format', format, ...(format === 'jpeg' ? ['-s', 'formatOptions', '70'] : []), ...(shrinks ? ['-Z', String(side)] : []), file, '--out', out]
-        : [name, `${file}[0]`, '-resize', `${side}x${side}>`, ...(format === 'jpeg' ? ['-quality', '70'] : []), `${{ bmp: 'BMP3', png: 'PNG', jpeg: 'JPG' }[format]}:${out}`]).catch(() => undefined)
+        // A BMP of 32 bits, its alpha kept: a picture not resized (one already small) would keep its
+        // palette, an 8-bit BMP, and BMP3 has no alpha.
+        : [name, `${file}[0]`, '-resize', `${side}x${side}>`, ...(format === 'jpeg' ? ['-quality', '70'] : format === 'bmp' ? ['-type', 'TrueColorAlpha'] : []), `${{ bmp: 'BMP', png: 'PNG', jpeg: 'JPG' }[format]}:${out}`]).catch(() => undefined)
     if (result?.exitCode === 0) {
       tool = name
       return size

@@ -31,6 +31,7 @@ registerHooks({
   }
 })
 
+const { parseBmp } = await import('../hooks/pixels.ts')
 const { canShowWindows, convert, detect, makeFolder, readBytes, remove, tempFolder, touch, windowCommand, windowPath, writeBytes, writeFrames } = await import('../hooks/system.ts')
 
 /** The part of the engine's `$` the system layer uses, run for real. */
@@ -79,6 +80,19 @@ function png (width: number, height: number) {
   return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...chunk('IHDR', [...u32(width), ...u32(height), 8, 2, 0, 0, 0]), ...chunk('IDAT', blocks), ...chunk('IEND', [])])
 }
 
+/** A PNG of a palette of one see-through colour, `width` by `height`, its deflate blocks stored. */
+function palettePng (width: number, height: number) {
+  const raw = new Array((width + 1) * height).fill(0)
+  const blocks = [0x78, 0x01, 1, raw.length & 0xff, raw.length >> 8, ~raw.length & 0xff, (~raw.length >> 8) & 0xff, ...raw]
+  const b = raw.length % 65521
+  blocks.push(b >> 8, b & 0xff, 0, 1)
+  const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0 })
+  const crc = (bytes: number[]) => { let c = 0xffffffff; for (const byte of bytes) c = crcTable[(c ^ byte) & 0xff]! ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0 }
+  const u32 = (n: number) => [24, 16, 8, 0].map(s => (n >>> s) & 0xff)
+  const chunk = (type: string, body: number[]) => { const head = [...type].map(c => c.charCodeAt(0)); return [...u32(body.length), ...head, ...body, ...u32(crc([...head, ...body]))] }
+  return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...chunk('IHDR', [...u32(width), ...u32(height), 8, 3, 0, 0, 0]), ...chunk('PLTE', [255, 0, 0]), ...chunk('tRNS', [0]), ...chunk('IDAT', blocks), ...chunk('IEND', [])])
+}
+
 const root = mkdtempSync(join(tmpdir(), 'inline-images-check-'))
 const system = await detect($)
 console.log(`system: ${system}; temp folder: ${await tempFolder($)}; working in ${root}`)
@@ -119,6 +133,13 @@ try {
   await convert($, file, join(root, 'same.png'), 'png', 1000)
   const out = new Uint8Array(readFileSync(join(root, 'same.png')))
   check('convert never enlarges a smaller picture', new DataView(out.buffer, out.byteOffset).getUint32(16) === 300)
+  // A small palette PNG with a see-through colour: not resized, it is still made a BMP the cells
+  // read (24 or 32 bits), its see-through pixel kept where the converter keeps alpha.
+  const icon = join(root, 'icon.png')
+  writeFileSync(icon, palettePng(8, 8))
+  await convert($, icon, join(root, 'icon.bmp'), 'bmp', 800)
+  const pixels = parseBmp(new Uint8Array(readFileSync(join(root, 'icon.bmp'))))
+  check('convert makes a small palette PNG a BMP the cells read', pixels.width === 8, `${pixels.width}x${pixels.height}, alpha ${pixels.data[3]}`)
 } catch (error) {
   check('convert', false, error instanceof Error ? error.message : String(error))
 }
