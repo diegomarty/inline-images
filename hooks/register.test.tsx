@@ -1514,3 +1514,10 @@ test('a block that is indented code keeps its indent', async ($, on) => {
   const row = await answer($, 'Saved shot.png:\n\n    convert shot.png out.png', 'a-1')
   expect((await row.findAll({ type: 'Markdown' })).map(block => block.props.text)).toEqual(['Saved shot.png:', '    convert shot.png out.png'])
 })
+
+test('a picture named after a very long word still gets its chip', async ($, on) => {
+  world(on, { files: { '/project/app/after.png': PNG } })
+  await startSession($)
+  const row = await answer($, `${'a'.repeat(20000)} then after.png`, 'a-1')
+  expect(await row.find({ key: 'ref:0' })).toMatchObject({ props: { props: { label: 'after.png' } } })
+})

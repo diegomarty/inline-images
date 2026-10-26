@@ -87,8 +87,9 @@ const DRAWN_MS = 2000
 // While a session runs its cache folder is touched this often, so another session's sweep of caches
 // gone a week never takes it.
 const TOUCH_MS = 6 * 60 * 60 * 1000
-// A picture an answer names without drawing it: in a link's target, in code, or bare.
-const REFERENCE = /\]\(\s*<?([^)\s>]+\.(?:png|jpe?g|gif|webp))>?[^)]*\)|`([^`\n]+\.(?:png|jpe?g|gif|webp))`|((?:[A-Za-z]:)?(?:~|\.{1,2})?[\\/]?[\w@%+.-]+(?:[\\/][\w@%+.-]+)*\.(?:png|jpe?g|gif|webp))(?![\w\\/])/gi
+// A picture an answer names without drawing it: in a link's target, in code, or bare. A bare one
+// starts where a word does: tried from inside a long word, each try would scan to its end.
+const REFERENCE = /\]\(\s*<?([^)\s>]+\.(?:png|jpe?g|gif|webp))>?[^)]*\)|`([^`\n]+\.(?:png|jpe?g|gif|webp))`|(?<![\w@%+.~:\\/-])((?:[A-Za-z]:)?(?:~|\.{1,2})?[\\/]?[\w@%+.-]+(?:[\\/][\w@%+.-]+)*\.(?:png|jpe?g|gif|webp))(?![\w\\/])/gi
 const WEB_LINK = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi
 const MAX_REFERENCES = 24
 // The card a chip opens: the most rows its picture takes, and what the border and caption add.
