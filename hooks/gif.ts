@@ -6,6 +6,9 @@ export type Frame = Pixels & { delay: number }
 // Browsers show a frame that asks for 10 ms or less for 100 ms: so do GIFs expect to be played.
 const MIN_DELAY = 20
 const SLOW_DELAY = 100
+// The most canvas pixels decoded in all, frames together: past it a long animation of a large
+// canvas is cut, rather than take minutes.
+const MAX_WORK = 400_000_000
 
 export const isGif = (bytes: Uint8Array) => bytes.length > 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46
 
@@ -29,7 +32,8 @@ function lzw (data: Uint8Array, minSize: number, count: number) {
   let bits = 0
   let held = 0
   let written = 0
-  for (let i = 0; i < data.length && written < count;) {
+  // Codes are read till the bits run out, not the bytes: the last bytes hold codes still to read.
+  for (let i = 0; written < count;) {
     while (bits < size && i < data.length) {
       held |= data[i++]! << bits
       bits += 8
@@ -140,6 +144,7 @@ export function decodeGif (bytes: Uint8Array, maxFrames = 500, side?: (width: nu
 
   const canvas = new Uint8Array(width * height * 4)
   const frames: Frame[] = []
+  maxFrames = Math.max(1, Math.min(maxFrames, Math.floor(MAX_WORK / (width * height))))
   const keep = side ? side(width, height, Math.min(maxFrames, countFrames(bytes))) : Math.max(width, height)
   let delay = 0
   let transparent = -1
@@ -194,6 +199,10 @@ export function decodeGif (bytes: Uint8Array, maxFrames = 500, side?: (width: nu
       at += size
     }
     const minSize = bytes[at++]!
+    // A code size past 11 (a table of more than 4096 entries) or a frame larger than any canvas
+    // is no GIF's: a broken or crafted file, not decoded at the cost of seconds or gigabytes.
+    if (minSize < 1 || minSize > 11) throw new Error('a broken GIF')
+    if (w * h > 4096 * 4096) throw new Error('a broken GIF')
     const indices = lzw(blocks(), minSize, w * h)
     if (!palette) throw new Error('a GIF with no palette')
 

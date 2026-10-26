@@ -1447,3 +1447,52 @@ test('Ghostty and kitty are handed a still by its path: the file is never read w
   expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { file: '/project/app/shot.png' } } })
   expect(w.reads).not.toContain('/project/app/shot.png')
 })
+
+// --- What is left of the first review, before the mod is public.
+
+/**
+ * A GIF of a canvas `width` by `height`, a palette of 4 colours (black, red, green, blue) and one
+ * frame per entry of `frames`: its size, its LZW minimum code size, and its codes, each with its
+ * width in bits.
+ */
+function gifOf (width: number, height: number, frames: { w: number; h: number; minSize: number; codes: [number, number][] }[]) {
+  const u16 = (n: number) => [n & 0xff, n >> 8]
+  const bytes = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61, ...u16(width), ...u16(height), 0x81, 0, 0, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+  for (const frame of frames) {
+    const data: number[] = []
+    let held = 0
+    let bits = 0
+    for (const [code, size] of frame.codes) {
+      held |= code << bits
+      bits += size
+      while (bits >= 8) {
+        data.push(held & 0xff)
+        held >>>= 8
+        bits -= 8
+      }
+    }
+    if (bits > 0) data.push(held & 0xff)
+    bytes.push(0x2c, 0, 0, 0, 0, ...u16(frame.w), ...u16(frame.h), 0, frame.minSize, data.length, ...data, 0)
+  }
+  bytes.push(0x3b)
+  return Uint8Array.from(bytes)
+}
+
+test('a GIF\'s last codes, held in the last byte read, are decoded: its last pixel is not lost', () => {
+  // Clear, red, green, blue, end: the end code 4 bits wide, as the table has grown to 8.
+  const { frames } = decodeGif(gifOf(3, 1, [{ w: 3, h: 1, minSize: 2, codes: [[4, 3], [1, 3], [2, 3], [3, 3], [5, 4]] }]))
+  expect([...frames[0]!.data]).toEqual([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255])
+})
+
+test('a GIF with a code size no GIF has, or a frame larger than any canvas, is refused at once', () => {
+  const started = Date.now()
+  expect(() => decodeGif(gifOf(2, 1, [{ w: 2, h: 1, minSize: 30, codes: [[0, 8]] }]))).toThrow('a broken GIF')
+  expect(() => decodeGif(gifOf(2, 1, [{ w: 40000, h: 40000, minSize: 2, codes: [[4, 3], [1, 3], [5, 3]] }]))).toThrow('a broken GIF')
+  expect(Date.now() - started).toBeLessThan(1000)
+})
+
+test('a long animation of a large canvas is cut, rather than decoded for minutes', () => {
+  const frame = { w: 1, h: 1, minSize: 2, codes: [[4, 3], [1, 3], [5, 3]] as [number, number][] }
+  const { frames } = decodeGif(gifOf(4000, 4000, Array.from({ length: 40 }, () => frame)), 500, () => 1)
+  expect(frames.length).toBe(25)
+})
