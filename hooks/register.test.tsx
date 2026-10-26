@@ -1496,3 +1496,21 @@ test('a long animation of a large canvas is cut, rather than decoded for minutes
   const { frames } = decodeGif(gifOf(4000, 4000, Array.from({ length: 40 }, () => frame)), 500, () => 1)
   expect(frames.length).toBe(25)
 })
+
+test('an answer\'s blocks keep a nested list, an item\'s paragraph after a blank line, a long fence and its link definitions', async ($, on) => {
+  world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const text = '1. Saved shot.png\n   - cropped\n   - 2x\n\n   Kept as is.\n\nSee [the docs][1].\n\n````md\n```js\n\nx\n```\n````\n\n[1]: https://example.com/docs'
+  const row = await answer($, text, 'a-1')
+  const blocks = (await row.findAll({ type: 'Markdown' })).map(block => String(block.props.text))
+  expect(blocks[0]).toBe('1. Saved shot.png\n   - cropped\n   - 2x\n\n   Kept as is.\n\n[1]: https://example.com/docs')
+  expect(blocks[1]).toBe('See [the docs][1].\n\n[1]: https://example.com/docs')
+  expect(blocks[2]).toBe('````md\n```js\n\nx\n```\n````')
+})
+
+test('a block that is indented code keeps its indent', async ($, on) => {
+  world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const row = await answer($, 'Saved shot.png:\n\n    convert shot.png out.png', 'a-1')
+  expect((await row.findAll({ type: 'Markdown' })).map(block => block.props.text)).toEqual(['Saved shot.png:', '    convert shot.png out.png'])
+})

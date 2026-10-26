@@ -1151,25 +1151,36 @@ function blocksOf (text: string) {
   const blocks: Block[] = []
   let lines: string[] = []
   let gap = false
-  let fence: string | undefined
+  // The fence a code block opened with (its character, and how many): a shorter run inside it, or
+  // one of the other character, is its text.
+  let fence: { char: string; length: number } | undefined
   const flush = () => {
     if (lines.length > 0) blocks.push({ text: lines.join('\n'), gap })
     lines = []
     gap = false
   }
-  for (const line of text.split('\n')) {
+  const all = text.split('\n')
+  for (const [i, line] of all.entries()) {
     if (fence) {
       lines.push(line)
-      if (line.trimStart().startsWith(fence)) fence = undefined
+      const closes = /^\s*(`{3,}|~{3,})\s*$/.exec(line)
+      if (closes && closes[1]![0] === fence.char && closes[1]!.length >= fence.length) fence = undefined
       continue
     }
-    const opens = /^\s*(```|~~~)/.exec(line)
-    if (opens) fence = opens[1]
+    const opens = /^\s*(`{3,}|~{3,})/.exec(line)
+    if (opens) fence = { char: opens[1]![0]!, length: opens[1]!.length }
     else if (line.trim() === '') {
+      // A list item goes on past a blank line where what follows is indented under it.
+      const after = all.slice(i + 1).find(next => next.trim() !== '')
+      if (lines.length > 0 && /^ {0,3}([-*+]|\d+[.)])\s/.test(lines[0]!) && after !== undefined && /^\s+\S/.test(after)) {
+        lines.push(line)
+        continue
+      }
       flush()
       gap = blocks.length > 0
       continue
-    } else if (/^ {0,3}([-*+]|\d+[.)])\s/.test(line) && lines.length > 0 && !/^\s*\|/.test(lines[0]!)) flush()
+    // A list item at the margin starts a block; one indented under it is its own.
+    } else if (/^([-*+]|\d+[.)])\s/.test(line) && lines.length > 0 && !/^\s*\|/.test(lines[0]!)) flush()
     lines.push(line)
   }
   flush()
@@ -1449,6 +1460,8 @@ export const register: Register = (on, options) => {
     }
 
     const blocks = blocksOf(text)
+    // The answer's link definitions (`[1]: https://…`), outside a fence.
+    const definitions = blocks.filter(block => !/^\s*(`{3,}|~{3,})/.test(block.text)).flatMap(block => block.text.split('\n').filter(line => /^ {0,3}\[[^\]]+\]:\s*\S/.test(line))).join('\n')
     const named: string[][] = []
     for (const [i, block] of blocks.entries()) {
       const embedded = embeddedIn(block.text).flatMap(target => absolute(target, cwd, home) ?? [])
@@ -1484,7 +1497,11 @@ export const register: Register = (on, options) => {
       const { drawn: pictures, targets } = embeddedOf(block.text, place, `image-${i}`)
       // A picture drawn under the block is not written in it too, as its alt and path.
       const isDrawn = new Set(embeddedAt(block.text).filter(({ target }) => targets.has(target)).map(({ at }) => at))
-      const shown = block.text.replace(MARKDOWN_IMAGE, (match: string, alt: string, target: string, at: number) => (isDrawn.has(at) ? '' : match)).trim()
+      // Trimmed of blank lines, not of the indent that makes a code block one; with every link
+      // definition of the answer, so a reference link reads in any block.
+      const body = block.text.replace(MARKDOWN_IMAGE, (match: string, alt: string, target: string, at: number) => (isDrawn.has(at) ? '' : match)).replace(/^(\s*\n)+|\s+$/g, '')
+      const isFence = /^\s*(`{3,}|~{3,})/.test(body)
+      const shown = body.length > 0 && definitions && !isFence ? `${body}\n\n${definitions}` : body
       return (
         <Box key={`block-${i}`} flexDirection="column" marginTop={block.gap ? 1 : 0}>
           {shown.length > 0 && (
