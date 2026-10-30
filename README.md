@@ -24,7 +24,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo.gif" alt="Illustration: Claude reads docs/media/sunset.gif, and the GIF plays in the terminal under its Read row" width="760">
+  <img src="docs/demo.gif" alt="Animation: a prompt is sent, Claude reads docs/media/sunset.gif and the GIF plays under its Read row; the pointer comes onto it and the picture opens larger in a window by the pointer, which closes as the pointer leaves" width="760">
 </p>
 
 ---

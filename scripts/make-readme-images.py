@@ -1,6 +1,7 @@
 """Draws the README's pictures, illustrations of what the mod does, in the icon's palette:
 
-- docs/demo.gif: a Claude Code transcript where Claude reads a GIF, the GIF playing under its row;
+- docs/demo.gif: how it is used: a prompt typed and sent, Claude reads a GIF, the GIF plays under its
+  row, the pointer comes onto it and it opens larger in a window by the pointer, then closes;
 - docs/pixels-and-cells.png: one picture as Ghostty and kitty draw it, and in cells, as any other
   terminal with true color does.
 
@@ -10,7 +11,7 @@ import math
 import os
 import random
 import sys
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from art import GREEN, INK, MUTED, ORANGE, WINDOW, gradient, mono, rounded_mask, scene
 
@@ -81,33 +82,106 @@ def finish(img):
     return img.resize((img.width // X, img.height // X), Image.LANCZOS)
 
 
-# --- docs/demo.gif: Claude reads a GIF; it plays under the row.
+# --- docs/demo.gif: how it is used.
+ARROW = [(0, 0), (0, 17), (4.5, 13), (7.5, 20), (10, 19), (7, 12.5), (12.5, 12.5)]
+PROMPT = 'what is in docs/media/sunset.gif?'
+
+
+def pointer(d, x, y):
+    """The pointer, its tip at (x, y)."""
+    d.polygon([(x + ax * X * 1.3, y + ay * X * 1.3) for ax, ay in ARROW], fill=INK, outline=(20, 10, 30))
+
+
+def popup(img, x, y, pic, shown):
+    """The window by the pointer: borderless, rounded, a shadow under it, the picture in it, grown to
+    `shown` (0 to 1) as it opens. Answers the image drawn on."""
+    pad = 6 * X
+    w, h = pic.width + pad * 2, pic.height + pad * 2
+    s = 0.86 + 0.14 * shown
+    sw, sh = int(w * s), int(h * s)
+    shadow = Image.new('RGBA', img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle((x + 4 * X, y + 10 * X, x + sw + 4 * X, y + sh + 10 * X), 10 * X, fill=(4, 2, 12, int(190 * shown)))
+    img = Image.alpha_composite(img, shadow.filter(ImageFilter.GaussianBlur(14 * X)))
+    body = Image.new('RGBA', (w, h), (58, 46, 86, 255))
+    body.paste(pic, (pad, pad))
+    body = body.resize((sw, sh), Image.LANCZOS)
+    body.putalpha(Image.eval(rounded_mask((sw, sh), 10 * X), lambda a: int(a * shown)))
+    img.alpha_composite(body, (int(x), int(y)))
+    return img
+
+
 def demo():
-    W, H = 900 * X, 520 * X
-    pw, ph = 384 * X, 216 * X
-    frames = []
-    count = 24
-    for i in range(count):
+    W, H = 900 * X, 540 * X
+    pw, ph = 330 * X, 186 * X
+    big = (470 * X, 265 * X)
+    # The frames, each its time on screen: the prompt typed, sent, the read, the pointer coming, the
+    # window opening, held, the pointer leaving.
+    typed = list(range(0, len(PROMPT) + 1, 3)) + [len(PROMPT)]
+    steps = [('type', n, 60) for n in typed] + [('type', len(PROMPT), 400)]
+    steps += [('read', 0, 500)]
+    steps += [('come', t / 7, 70) for t in range(8)]
+    steps += [('open', t / 3, 60) for t in range(1, 4)]
+    steps += [('held', t, 110) for t in range(16)]
+    steps += [('leave', t / 5, 70) for t in range(6)]
+    steps += [('rest', t, 110) for t in range(6)]
+    frames, durations = [], []
+    for i, (phase, value, ms) in enumerate(steps):
         img, d, (x, y) = window(W, H, '~/sunset — claude')
-        user_row(img, d, x, y, 'what is in docs/media/sunset.gif?')
-        y += LINE * 2
-        text(d, x, y, [('● ', GREEN), ('Read', INK), ('(docs/media/sunset.gif)', MUTED)])
-        y += LINE
-        result(d, x, y, 'Read image (152KB)')
-        y += LINE * 0.75
-        # The picture, under the row where its text starts, the sun sinking and rising again.
-        sink = 0.07 + 0.11 * math.sin(2 * math.pi * i / count)
-        img.paste(sunset(pw, ph, sink), (int(x + CELL * 5), int(y)))
-        y += ph + LINE * 1.0
-        text(d, x, y, [('● ', INK), ('A synthwave sunset: the sun sinks behind violet mountains,', INK)])
-        y += LINE
-        text(d, x, y, [('  over a neon grid that runs to the horizon.', INK)])
-        prompt_box(img, d, x - 6 * X, H - 60 * X, W - 2 * x + 12 * X, cursor=i % 8 < 4)
+        sink = 0.07 + 0.11 * math.sin(2 * math.pi * i / 24)
+        is_sent = phase != 'type'
+        if is_sent:
+            user_row(img, d, x, y, PROMPT)
+            y += LINE * 2
+            text(d, x, y, [('● ', GREEN), ('Read', INK), ('(docs/media/sunset.gif)', MUTED)])
+            y += LINE
+            result(d, x, y, 'Read image (152KB)')
+            y += LINE * 0.75
+            left, top = int(x + CELL * 5), int(y)
+            img.paste(sunset(pw, ph, sink), (left, top))
+            y += ph + LINE * 1.0
+            text(d, x, y, [('● ', INK), ('A synthwave sunset: the sun sinks behind violet mountains,', INK)])
+            y += LINE
+            text(d, x, y, [('  over a neon grid that runs to the horizon.', INK)])
+        box_y = H - 60 * X
+        prompt_box(img, d, x - 6 * X, box_y, W - 2 * x + 12 * X, cursor=is_sent and i % 8 < 4)
+        if not is_sent:
+            # What is typed so far, the cursor after it.
+            end = text(d, x - 6 * X + 14 * X + CELL * 2, box_y + 20 * X, [(PROMPT[:value], INK)])
+            d.rectangle((end, box_y + 11 * X, end + CELL * 0.9, box_y + 29 * X), fill=INK)
+        # The pointer: from the foot of the window onto the picture, then away to the right.
+        start, on, away = (W * 0.78, H * 0.80), (left + pw * 0.55, top + ph * 0.45) if is_sent else (0, 0), (W * 0.86, H * 0.62)
+        ease = lambda t: t * t * (3 - 2 * t)
+        if phase == 'read':
+            at = start
+        elif phase == 'come':
+            t = ease(value)
+            at = (start[0] + (on[0] - start[0]) * t, start[1] + (on[1] - start[1]) * t)
+        elif phase in ('open', 'held'):
+            at = on
+        elif phase == 'leave':
+            t = ease(value)
+            at = (on[0] + (away[0] - on[0]) * t, on[1] + (away[1] - on[1]) * t)
+        elif phase == 'rest':
+            at = away
+        else:
+            at = None
+        # The window by the pointer, below it and to its right, never over it.
+        shown = value if phase == 'open' else 1.0 if phase == 'held' else 0
+        if shown > 0:
+            img = popup(img, at[0] + 18 * X, at[1] + 18 * X - big[1] * 0.55, sunset(*big, sink), shown)
+            d = ImageDraw.Draw(img)
+        if at is not None:
+            pointer(d, *at)
         frames.append(finish(img))
-    # One palette for every frame, so only the picture changes from one to the next; it holds the
+        durations.append(ms)
+    save_gif(frames, durations, 'demo.gif')
+
+
+def save_gif(frames, durations, name):
+    # One palette for every frame, so only what moves changes from one to the next; it holds the
     # window's few strong colors (the dots, the bullet, the chevron) and the corners' see-through one.
     keep = [PAGE, GREEN, ORANGE, INK, MUTED, (255, 95, 87), (254, 188, 46), (40, 200, 64)]
-    sample = frames[len(frames) // 4].convert('RGB')
+    sample = frames[-12].convert('RGB')
     source = Image.new('RGB', (sample.width, sample.height + 64))
     source.paste(sample, (0, 0))
     swatch = sample.width // len(keep)
@@ -122,7 +196,7 @@ def demo():
         q = frame.convert('RGB').quantize(palette=palette, dither=Image.Dither.NONE)
         q.paste(clear, (0, 0), Image.eval(frame.split()[3], lambda a: 255 if a < 128 else 0))
         out.append(q)
-    out[0].save(os.path.join(OUT, 'demo.gif'), save_all=True, append_images=out[1:], duration=90, loop=0, optimize=False, disposal=1, transparency=clear)
+    out[0].save(os.path.join(OUT, name), save_all=True, append_images=out[1:], duration=durations, loop=0, optimize=False, disposal=1, transparency=clear)
 
 
 # --- docs/pixels-and-cells.png: the same picture in pixels and in cells.
