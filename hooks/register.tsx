@@ -100,9 +100,8 @@ type Href = { href: string; width: number; height: number }
 // pictures (CLAUDE_CODE_FORCE_TERMINAL_IMAGES) is sent its bytes; any other gets it in colored cells.
 let graphics: 'none' | 'file' | 'bytes' = 'none'
 // iTerm2 3.5 and later draws pictures in fullscreen alone: whether the session is, its first drawing
-// says. Where the terminal draws cells, a picture under the pointer opens in a window of its own, on
-// the desktop the session runs on: whether it can, the window open now, and the picture under the
-// pointer.
+// says. A picture under the pointer opens larger in a window of its own, on the desktop the session
+// runs on: whether it can, the window open now, and the picture under the pointer.
 let isItermPending = false
 let canWindow = false
 // The window's program, one a session (window.ts): what it says, the file it is told what to do in,
@@ -310,18 +309,15 @@ function forget (key: string) {
   }
 }
 
-/** Whether a picture under the pointer opens in a window: a terminal that draws cells, on a desktop. */
-const isWindowing = () => canWindow && graphics === 'none'
-
 /**
  * Whether pictures show as chips, each opening in the window as the pointer comes onto it: the
  * Compact view option, where there is a pointer (fullscreen) and a window to open.
  */
 const isCompact = (viewport?: { isFullscreen?: boolean }) => compact && canWindow && viewport?.isFullscreen !== false
 
-/** A window lost, for one picture or for all: the chips that stood for them draw the pictures instead. */
+/** A window lost, for one picture or for all: the chips that opened it draw the pictures (or their names) instead. */
 function loseWindow ($: Engine) {
-  if (compact) $.ui.invalidate('ui.render')
+  $.ui.invalidate('ui.render')
 }
 
 /** Settles iTerm2's way at the first drawing: pixels in fullscreen, cells elsewhere. */
@@ -345,7 +341,7 @@ function startHost ($: Engine) {
 
 async function launchHost ($: Engine) {
   if (!canWindow) return undefined
-  // Ended on its own too often: the cells are all.
+  // Ended on its own too often: the terminal's drawing is all.
   if (hostStarts >= WINDOW_STARTS) {
     canWindow = false
     $.ui.log(`inline-images: no window (its program ended ${WINDOW_STARTS} times); the terminal shows the pictures`, { to: 'debug' })
@@ -400,7 +396,7 @@ async function readHost ($: Engine, running: Host) {
   if (host !== running) return
   host = undefined
   windowKey = undefined
-  // Ended before it was ready, or saying it cannot run here: the cells are all.
+  // Ended before it was ready, or saying it cannot run here: the terminal's drawing is all.
   if (running.isReady && !/^error: /m.test(said)) return
   canWindow = false
   $.ui.log(`inline-images: no window (${said.trim().slice(0, 300) || 'the program could not start'}); the terminal shows the pictures`, { to: 'debug' })
@@ -939,9 +935,9 @@ function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessag
     // Off screen (`null`) an animation stops; a surface that does not say counts as on screen.
     isShown: !('onScreen' in e.props) || e.props.onScreen !== null,
     animate,
-    // The pointer reaches a picture in fullscreen alone; it is wanted there to open a window, or for
-    // a click where clicks open pictures.
-    canPoint: e.viewport?.isFullscreen !== false && (isWindowing() || clickOpens),
+    // The pointer reaches a picture in fullscreen alone; it is wanted there to open it larger in the
+    // window, or for a click where clicks open pictures.
+    canPoint: e.viewport?.isFullscreen !== false && (canWindow || clickOpens),
     isCompact: isCompact(e.viewport)
   }
 }
@@ -982,6 +978,12 @@ function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: st
   )
 }
 
+/** A picture's name over it: a chip that opens it larger in the window, where the pointer can; dim text elsewhere. */
+function labelOf (site: Site, key: string, label: string, slot: string): RenderElement {
+  if (site.canPoint && canWindow && !noWindow.has(key)) return chipOf(site, key, label, `ref:${slot}:${nameOf(key)}`)
+  return <site.ui.Text key={`${slot}:${key}`} dimColor wrap="truncate-end">{label}</site.ui.Text>
+}
+
 /** A chip naming a picture (`file`, an answer's): the pointer on it opens the picture in the window, a click (where clicks open) in the system's viewer. */
 function chipOf (site: Site, key: string, label: string, element: string, file?: string): RenderElement {
   chips.set(`${site.requestId}/${element}`, { key, file })
@@ -1011,7 +1013,7 @@ function pastedRow ($: Engine, site: Site, all: Record<string, Picture>, ids: nu
       {shown.slice(0, count).map(id => (
         <Box key={`pasted-${id}`} flexDirection="column" flexShrink={0}>
           {pictureOf($, share, all, pasteKey(id), label(id), 'pasted')}
-          {isNamed && !site.isCompact && <Text dimColor wrap="truncate-end">{label(id)}</Text>}
+          {isNamed && !site.isCompact && labelOf(share, pasteKey(id), label(id), 'label')}
         </Box>
       ))}
       {rest > 0 && <Text dimColor>{more(rest)}</Text>}
@@ -1234,10 +1236,9 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'images', description: 'Inline Images: turn the pictures on or off, or set their size', argumentHint: 'on | off | small | medium | large', immediate: true })
     // The window's program, started now so the first picture under the pointer opens at once: in
     // the fullscreen interface alone, the one with a pointer (elsewhere, at the first hover there is
-    // ever one; iTerm2's once its first drawing says it draws cells), where the terminal draws cells
-    // or the compact view's chips open their pictures in it.
+    // ever one).
     const tui = await $.settings.read().then(settings => settings.tui, () => undefined)
-    if (((isWindowing() && !isItermPending) || (compact && canWindow)) && tui === 'fullscreen') void startHost($).catch(() => undefined)
+    if (canWindow && tui === 'fullscreen') void startHost($).catch(() => undefined)
     return result
   })
 
@@ -1352,7 +1353,7 @@ export const register: Register = (on, options) => {
       const key = loadRead($, id, output)
       const label = path ? baseName(path) : 'image'
       // A chip names its picture itself.
-      if ((reads.length > 1 || e.props.isExpanded) && !site.isCompact) drawn.push(<Text key={`label:${id}`} dimColor>{label}</Text>)
+      if ((reads.length > 1 || e.props.isExpanded) && !site.isCompact) drawn.push(labelOf(site, key, label, 'label'))
       drawn.push(pictureOf($, site, all, key, label))
     }
     return withPictures(site.ui, await next(e), RESULT_INDENT, drawn)
@@ -1548,7 +1549,7 @@ export const register: Register = (on, options) => {
       if (data?.isClicked === true && clickOpens) {
         pointAt($, opened, false)
         if (file) void openFile($, file)
-      } else if (isWindowing()) pointAt($, opened, data?.isOver === true)
+      } else if (canWindow) pointAt($, opened, data?.isOver === true)
       return result
     }
     const chip = /^ref:/.test(e.element) ? chips.get(`${e.requestId}/${e.element}`) : undefined

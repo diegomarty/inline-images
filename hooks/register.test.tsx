@@ -700,7 +700,8 @@ test('an unfolded group of reads (--verbose, ctrl+o) shows its pictures under it
   const row = await group(true, 'g-1')
   expect(await row.find({ key: 'engine' })).toBeDefined()
   expect((await row.findAll({ type: 'Image' })).map(image => image.props.alt)).toEqual(['a.png', 'b.png'])
-  expect(await row.find({ type: 'Text', text: 'a.png' })).toBeDefined()
+  // Each name a chip: the pointer on it opens the picture larger in the window.
+  expect((await row.findAll({ type: 'Client' })).filter(client => String(client.key).startsWith('ref:')).map(client => client.props.props)).toEqual([{ label: 'a.png' }, { label: 'b.png' }])
 })
 
 test('a click on a picture drawn opens it in the system viewer: the file read, or the copy of the bytes Claude was sent', { options: { click: true } }, async ($, on) => {
@@ -718,11 +719,25 @@ test('a click on a picture drawn opens it in the system viewer: the file read, o
   expect(w.runs.filter(run => run.argv[0] === 'open').map(run => run.argv[1])[1]).toMatch(/\/inline-images\/s-1\/read-[0-9a-f]+\.source\.png$/)
 })
 
-test('by default a click opens nothing: a picture the terminal draws takes no region, and one in cells keeps its window', async ($, on) => {
-  const w = world(on, { files: { '/project/app/shot.png': PNG } })
+test('with no window and clicks off, a picture the terminal draws takes no region', { options: { window: false } }, async ($, on) => {
+  world(on, { files: { '/project/app/shot.png': PNG } })
   await startSession($)
   await readRow($, 'tu-1', '/project/app/shot.png')
   expect(await (await resultRow($, 'tu-1', image(PNG))).findAll({ type: 'Client' })).toEqual([])
+})
+
+test('in a terminal that draws pictures, one under the pointer opens larger in the window; a click opens nothing', async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Image' })).toBeDefined()
+  const region = String((await row.findAll({ type: 'Client' })).find(client => String(client.key).startsWith('open:'))!.key)
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: region })
+  await row.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: region })
+  await row.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: region })
+  await w.clock.advance(50)
+  expect(shown(w)).toEqual(['/project/app/shot.png'])
   expect(w.runs.some(run => run.argv[0] === 'open')).toBe(false)
 })
 
@@ -802,7 +817,7 @@ test('a picture pasted in the draft shows above the prompt, small, named; one ty
   await w.clock.advance(4000)
   const band = await strip($)
   expect(await band.find({ type: 'Image' })).toMatchObject({ props: { source: { file: `${FOLDER}/1.png` }, alt: '[Image #1]' } })
-  expect(await band.find({ type: 'Text', text: '[Image #1]' })).toBeDefined()
+  expect((await band.findAll({ type: 'Client' })).find(client => String(client.key).startsWith('ref:'))).toMatchObject({ props: { props: { label: '[Image #1]' } } })
   expect(await band.find({ type: 'Text', text: /Image #9/ })).toBeUndefined()
 })
 
@@ -839,7 +854,7 @@ test('a session that ends for any reason forgets its cache: the next one is made
   expect(w.runs.find(run => run.argv[2]?.includes('base64 --decode >') && run.argv[3]!.startsWith(`${root}/s-2/`))).toBeDefined()
 })
 
-test('a file where the cache folder goes (sips writing into a folder removed) is replaced by the folder', async ($, on) => {
+test('a file where the cache folder goes (sips writing into a folder removed) is replaced by the folder', { options: { window: false } }, async ($, on) => {
   const root = '/tmp/claude-501/inline-images'
   const w = world(on, { files: { [`${root}/s-1`]: PNG } })
   await startSession($)
@@ -865,7 +880,7 @@ test('a pasted picture not found is looked for again once the last look is old',
   expect(await band.find({ type: 'Image' })).toMatchObject({ props: { alt: '[Image #2]' } })
 })
 
-test("a session's own cache is never swept as gone, and is touched while the session runs", async ($, on) => {
+test("a session's own cache is never swept as gone, and is touched while the session runs", { options: { window: false } }, async ($, on) => {
   const day = 24 * 60 * 60 * 1000
   const root = '/tmp/claude-501/inline-images'
   const w = world(on, { now: 30 * day, dirs: { [`${root}/s-1`]: 1 * day, [`${root}/old`]: 1 * day } })
