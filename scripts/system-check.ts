@@ -118,8 +118,9 @@ check('readBytes reads a 5 MiB file whole, in 2 MiB pieces', same(pieces, big))
 
 const frames = join(root, 'frames')
 await makeFolder($, frames)
-await writeFrames($, frames, [Uint8Array.of(1, 2, 3, 4).toBase64(), Uint8Array.of(5, 6, 7, 8).toBase64()])
-check('writeFrames writes each frame to its own file', same(new Uint8Array(readFileSync(join(frames, '1.rgba'))), Uint8Array.of(5, 6, 7, 8)), readdirSync(frames).join(' '))
+await writeFrames($, frames, [Uint8Array.of(1, 2, 3, 4)])
+await writeFrames($, frames, [Uint8Array.of(5, 6, 7, 8), Uint8Array.of(9, 10, 11, 12)], 1)
+check('writeFrames writes each frame to its own file, the first alone, then the rest', [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]].every((bytes, i) => same(new Uint8Array(readFileSync(join(frames, `${i}.rgba`))), Uint8Array.from(bytes))) && readdirSync(frames).length === 3, readdirSync(frames).join(' '))
 
 try {
   const size = await convert($, file, join(root, 'small.bmp'), 'bmp', 100)

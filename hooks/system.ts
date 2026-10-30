@@ -103,13 +103,25 @@ export async function writeBytes ($: Engine, path: string, base64: string) {
   ok(result, `could not write ${path}`)
 }
 
-/** Writes each base64 line of `lines` to `<dir>/<i>.rgba`, in one process. */
-export async function writeFrames ($: Engine, dir: string, lines: string[]) {
-  const stdin = `${lines.join('\n')}\n`
+/** Writes each of `frames`, all of one size, to `<dir>/<i>.rgba`, counting from `first`, in one process. */
+export async function writeFrames ($: Engine, dir: string, frames: Uint8Array[], first = 0) {
+  if (frames.length === 0) return
   const result = system === 'windows'
-    ? await powershell($, '$i = 0; while ($null -ne ($line = [Console]::In.ReadLine())) { if ($line) { [IO.File]::WriteAllBytes((Join-Path $env:INLINE_IMAGES_PATH "$i.rgba"), [Convert]::FromBase64String($line)); $i++ } }', { INLINE_IMAGES_PATH: dir }, [], stdin)
-    : await $.process.run(['sh', '-c', 'i=0; while IFS= read -r line; do printf %s "$line" | base64 --decode > "$0/$i.rgba" || exit 1; i=$((i+1)); done', dir], { stdin })
+    ? await powershell($, '$i = [int]$env:INLINE_IMAGES_FIRST; while ($null -ne ($line = [Console]::In.ReadLine())) { if ($line) { [IO.File]::WriteAllBytes((Join-Path $env:INLINE_IMAGES_PATH "$i.rgba"), [Convert]::FromBase64String($line)); $i++ } }', { INLINE_IMAGES_PATH: dir, INLINE_IMAGES_FIRST: String(first) }, [], `${frames.map(frame => frame.toBase64()).join('\n')}\n`)
+    // Decoded in one go, then cut into frames of one size: \`read\` takes a line a byte at a time.
+    : await $.process.run(['sh', '-c', 'base64 --decode > "$0/all-$1" && i=0 && while [ $i -lt "$3" ]; do dd if="$0/all-$1" of="$0/$(($1 + i)).rgba" bs="$2" skip=$i count=1 2>/dev/null || exit 1; i=$((i + 1)); done; rm -f "$0/all-$1"', dir, String(first), String(frames[0]!.length), String(frames.length)], { stdin: concat(frames).toBase64() })
   ok(result, 'could not write the frames')
+}
+
+/** Byte arrays one after another. */
+function concat (parts: Uint8Array[]) {
+  const all = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0))
+  let at = 0
+  for (const part of parts) {
+    all.set(part, at)
+    at += part.length
+  }
+  return all
 }
 
 /**

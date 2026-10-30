@@ -632,8 +632,19 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: stri
   if (graphics === 'bytes') return [picture, { sources: frames.map(frame => ({ rgba: frame.data.toBase64(), width, height })), delays }]
   const dir = `${await cacheFolder($)}/${nameOf(key + version)}`
   await makeFolder($, dir)
-  await writeFrames($, dir, frames.map(frame => frame.data.toBase64()))
-  return [picture, { sources: frames.map((_, i) => ({ file: `${dir}/${i}.rgba`, format: 'rgba' as const, width, height })), delays }]
+  const sources = frames.map((_, i) => ({ file: `${dir}/${i}.rgba`, format: 'rgba' as const, width, height }))
+  // The first frame is written alone, so the picture shows at once; the rest after it, and then it
+  // plays (where it is still the picture read, in this session).
+  await writeFrames($, dir, [frames[0]!.data])
+  if (count > 1) {
+    const mine = epoch
+    void writeFrames($, dir, frames.slice(1).map(frame => frame.data), 1).then(() => {
+      if (mine !== epoch || loaded.get(key)?.sources?.[0] !== sources[0]) return
+      keep(key, { sources, delays })
+      $.ui.invalidate('ui.render')
+    }, () => undefined)
+  }
+  return [picture, { sources: sources.slice(0, 1), delays: delays.slice(0, 1) }]
 }
 
 /**

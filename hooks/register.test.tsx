@@ -159,7 +159,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
       files[out] = argv[3] === 'bmp' ? bmp(0xff0000) : PNG
       return ok()
     }
-    if (argv[0] === 'sh' && argv[2]?.includes('base64 --decode >') && e.init?.stdin) files[argv[3]!] = e.init.stdin
+    if (argv[0] === 'sh' && argv[2]?.startsWith('base64 --decode > "$0"') && e.init?.stdin) files[argv[3]!] = e.init.stdin
     // `head -c <count> <file> | base64`: the file's first bytes.
     if (argv[0] === 'sh' && argv[2]?.startsWith('head -c')) return ok(decoded(files[argv[3]!] ?? '').subarray(0, Number(argv[4])).toBase64())
     // `tail -c +<from> <file> | head -c <count> | base64`: bytes from <from>, counted from 1.
@@ -315,8 +315,8 @@ test('a GIF plays while it shows, each frame swapped in after its delay', async 
   const row = await readResult($, image(gif([0, 1]).toBase64(), 'image/gif'))
   const drawn = await row.find({ type: 'Image' })
   expect(drawn).toMatchObject({ props: { source: { format: 'rgba', width: 2, height: 1 } } })
-  // Both frames written to files the terminal reads, in one process.
-  expect(w.runs.find(run => run.argv[2]?.includes('.rgba'))?.stdin?.split('\n').filter(Boolean)).toHaveLength(2)
+  // Both frames written to files the terminal reads: the first alone, so it shows at once, then the rest.
+  expect(w.runs.filter(run => run.argv[2]?.includes('.rgba')).map(run => run.argv.slice(4))).toEqual([['0', '8', '1'], ['1', '8', '1']])
   await w.clock.advance(200)
   expect(w.blits).toHaveLength(1)
   expect(w.blits[0]).toMatchObject({ requestId: 'tu-1', source: { file: expect.stringMatching(/\/1\.rgba$/) } })
