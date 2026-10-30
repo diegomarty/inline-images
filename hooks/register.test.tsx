@@ -334,6 +334,25 @@ test('a GIF whose frame swap is refused for a while tries again, and plays on', 
   expect(w.blits.slice(2, 4).map(blit => (blit.source as { file: string }).file.match(/\/(\d)\.rgba$/)![1])).toEqual(['1', '0'])
 })
 
+test("a GIF dropped from memory takes its frames off the disk: read again, they are written anew", async ($, on) => {
+  const w = world(on, { files: { '/project/app/out/anim.gif': gif([0, 1]).toBase64() } })
+  await startSession($)
+  const text = 'Here: ![anim](out/anim.gif)'
+  await answer($, text, 'a-1')
+  await w.clock.advance(10)
+  const folders = () => w.runs.filter(run => run.argv[0] === 'mkdir' && /\/file-[0-9a-f]+-\d+$/.test(run.argv.at(-1)!)).map(run => run.argv.at(-1)!)
+  expect(folders()).toHaveLength(1)
+  // The file changed: the GIF is read again, into a folder of its own, and the first one goes.
+  w.mtimes['/project/app/out/anim.gif'] = 5000
+  await w.clock.advance(4000)
+  await answer($, text, 'a-2')
+  await w.clock.advance(10)
+  await answer($, text, 'a-3')
+  await w.clock.advance(10)
+  expect(folders()).toHaveLength(2)
+  expect(w.runs.some(run => run.argv[0] === 'rm' && run.argv.at(-1) === folders()[0])).toBe(true)
+})
+
 test('a GIF off screen does not play', async ($, on) => {
   const w = world(on)
   await startSession($)

@@ -176,6 +176,11 @@ const chipFiles = new Map<string, string>()
 let hoveredAt: string | undefined
 // How many rows each block of an answer was laid out in, by the answer's requestId, as its probes said.
 const blockRows = new Map<string, number[]>()
+// The folder each GIF's frames are written in, by key; those of GIFs dropped from memory, to remove;
+// and how many have been written, so a GIF read again writes a folder of its own.
+const frameDirs = new Map<string, string>()
+const dropped: string[] = []
+let written = 0
 // The file a Read call read, by its tool_use_id, as its row named it.
 const readPaths = new Map<string, string>()
 
@@ -298,11 +303,19 @@ function reset () {
   openers.clear()
   drawnAt.clear()
   noWindow.clear()
+  frameDirs.clear()
+  dropped.length = 0
   index = undefined
 }
 
 /** A picture dropped from memory: its cells go too, and its animation stops. */
 function forget (key: string) {
+  // A GIF's frames on disk go with it: read again, it writes them anew.
+  const dir = frameDirs.get(key)
+  if (dir !== undefined) {
+    frameDirs.delete(key)
+    dropped.push(dir)
+  }
   for (const id of cells.keys()) if (id.startsWith(`${key}#`)) cells.delete(id)
   for (const [id, play] of playing) {
     if (play.key !== key) continue
@@ -630,8 +643,9 @@ async function loadGif ($: Engine, key: string, bytes: Uint8Array, version: stri
   const picture = { width: gif.width, height: gif.height, frames: count }
   if (graphics === 'none') return [picture, { pixels: frames, delays }]
   if (graphics === 'bytes') return [picture, { sources: frames.map(frame => ({ rgba: frame.data.toBase64(), width, height })), delays }]
-  const dir = `${await cacheFolder($)}/${nameOf(key + version)}`
+  const dir = `${await cacheFolder($)}/${nameOf(key + version)}-${++written}`
   await makeFolder($, dir)
+  frameDirs.set(key, dir)
   const sources = frames.map((_, i) => ({ file: `${dir}/${i}.rgba`, format: 'rgba' as const, width, height }))
   // The first frame is written alone, so the picture shows at once; the rest after it, and then it
   // plays (where it is still the picture read, in this session).
@@ -798,6 +812,12 @@ async function load ($: Engine, key: string, from: () => Promise<Origin[]>) {
   }
   // Read in the background: a module unloaded meanwhile has no state to write to.
   await update($, pictures, all => ({ ...all, [key]: picture })).catch(() => undefined)
+  void removeDropped($)
+}
+
+/** Removes the frames of the GIFs dropped from memory. */
+async function removeDropped ($: Engine) {
+  for (const dir of dropped.splice(0)) await remove($, dir).catch(() => undefined)
 }
 
 /**
