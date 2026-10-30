@@ -387,65 +387,96 @@ const images = ($: Engine, args: string) =>
 const answer = ($: Engine, text: string, requestId = 'a-1', onScreen: { first: number; last: number; of: number } | null = { first: 0, last: 9, of: 10 }) =>
   $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'AssistantMessage', requestId, props: { text, isFirstOfReply: true, onScreen }, viewport: SCREEN })
 
-test('a picture an answer only names gets a chip beside the block that names it, found under the working folder by its name', async ($, on) => {
-  world(on, { files: { '/project/app/docs/media/leads.gif': gif([0, 1]).toBase64() }, tracked: ['docs/media/leads.gif', 'src/index.ts'] })
+test('a picture an answer only names is drawn under the block that first names it, found under the working folder by its name', async ($, on) => {
+  const w = world(on, { files: { '/project/app/docs/media/leads.gif': gif([0, 1]).toBase64() }, tracked: ['docs/media/leads.gif', 'src/index.ts'] })
   await startSession($)
-  const row = await answer($, 'The README has two:\n\n1. Imagen: `leads.gif` (2,6 MB), in `docs/media/`\n2. And `other.png`, which is not there.')
+  const text = 'The README has two:\n\n1. Imagen: `leads.gif` (2,6 MB), in `docs/media/`\n2. And `other.png`, which is not there.\n\nAgain: leads.gif.'
+  const row = await answer($, text)
+  await w.clock.advance(10)
   expect((await row.findAll({ type: 'Markdown' })).map(block => block.props.text)).toEqual([
     'The README has two:',
     '1. Imagen: `leads.gif` (2,6 MB), in `docs/media/`',
-    '2. And `other.png`, which is not there.'
+    '2. And `other.png`, which is not there.',
+    'Again: leads.gif.'
   ])
+  // Under the list item that names it, and only there; no chip.
+  expect(JSON.stringify(await row.find({ key: 'block-1' }))).toContain('"Image"')
+  expect(await row.findAll({ type: 'Image' })).toHaveLength(1)
+  expect(await row.find({ key: 'ref:0' })).toBeUndefined()
+})
+
+const COMPACT = { options: { compact: true } }
+
+/** What the window was told to show, in order: each picture's path, or none while it is made. */
+const shown = (w: ReturnType<typeof world>) => w.shows.filter(show => show.verb === 'show').map(show => show.path)
+
+test('in the compact view a picture an answer shows is a chip beside the block that first shows it', COMPACT, async ($, on) => {
+  world(on, { files: { '/project/app/docs/media/leads.gif': gif([0, 1]).toBase64(), '/project/app/out/chart.png': PNG }, tracked: ['docs/media/leads.gif', 'src/index.ts'] })
+  await startSession($)
+  const row = await answer($, 'The README has two:\n\n1. Imagen: `leads.gif`, in `docs/media/`\n2. And `other.png`, which is not there.\n\nHere: ![chart](out/chart.png), and leads.gif again.')
   expect(await row.find({ key: 'ref:0' })).toMatchObject({ type: 'Client', props: { module: 'hooks/chip.tsx', props: { label: 'leads.gif' } } })
-  // Beside the list item that names it.
   expect(JSON.stringify(await row.find({ key: 'block-1' }))).toContain('"ref:0"')
-  expect(await row.find({ key: 'ref:1' })).toBeUndefined()
+  // The embedded one is a chip too, its markdown not written; the one named again gets none.
+  expect(await row.find({ key: 'ref:1' })).toMatchObject({ props: { props: { label: 'chart.png' } } })
+  expect(JSON.stringify(await row.find({ key: 'block-3' }))).toContain('"ref:1"')
+  expect(await row.find({ key: 'ref:2' })).toBeUndefined()
+  expect((await row.findAll({ type: 'Markdown' })).at(-1)!.props.text).toBe('Here: , and leads.gif again.')
   expect(await row.find({ type: 'Image' })).toBeUndefined()
 })
 
-test('the pointer on a chip opens its picture in a card over the answer; leaving closes it, a click opens the file', { options: { click: true } }, async ($, on) => {
+test('in the compact view the pointer on a chip opens its picture in the window, in any terminal; leaving closes it, a click opens the file', { options: { compact: true, click: true } }, async ($, on) => {
   const w = world(on, { files: { '/project/app/shot.png': PNG } })
   await startSession($)
-  const row = await answer($, 'First.\n\nSecond.\n\nI saved it as shot.png.', 'a-1', { first: 0, last: 9, of: 10 })
-  // Each block's probe says how tall it was laid out: rows 0-1, 3-4 and 6.
-  for (const [i, rows] of [2, 2, 1].entries()) await row.post({ rows }, { in: `probe:${i}` })
+  const row = await answer($, 'First.\n\nI saved it as shot.png.')
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  // The card is 4 rows (the border, a one-row picture, the caption): over the rows above the third block.
-  expect(await row.find({ key: 'card' })).toMatchObject({ props: { position: 'absolute', top: 2 } })
-  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { source: { file: '/project/app/shot.png' }, alt: 'shot.png' } })
-  // As wide as its caption, every cell beside the one-cell picture written: the answer does not show through.
-  expect(await row.find({ key: 'frame' })).toMatchObject({ props: { width: 10 } })
-  expect(await row.find({ type: 'Text', text: '   ' })).toBeDefined()
-  expect(await row.find({ type: 'Text', text: '    ' })).toBeDefined()
-  expect(await row.find({ type: 'Text', text: 'shot.png' })).toBeDefined()
+  await w.clock.advance(50)
+  expect(shown(w)).toEqual(['/project/app/shot.png'])
   await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toBeUndefined()
+  await w.clock.advance(50)
+  expect(w.shows.at(-1)!.verb).toBe('hide')
   await row.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: 'ref:0' })
   await row.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: 'ref:0' })
   expect(w.runs.some(run => run.argv[0] === 'open' && run.argv[1] === '/project/app/shot.png')).toBe(true)
 })
 
-test('with clicks off, the pointer on a chip still opens its card; a click opens nothing and leaves the card open', async ($, on) => {
+test('in the compact view with clicks off, a click on a chip opens nothing and leaves its window open', COMPACT, async ($, on) => {
   const w = world(on, { files: { '/project/app/shot.png': PNG } })
   await startSession($)
-  const row = await answer($, 'First.\n\nSecond.\n\nI saved it as shot.png.', 'a-1', { first: 0, last: 9, of: 10 })
-  for (const [i, rows] of [2, 2, 1].entries()) await row.post({ rows }, { in: `probe:${i}` })
+  const row = await answer($, 'I saved it as shot.png.')
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toBeDefined()
   await row.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: 'ref:0' })
   await row.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: 'ref:0' })
+  await w.clock.advance(50)
   expect(w.runs.some(run => run.argv[0] === 'open')).toBe(false)
-  expect(await row.find({ key: 'card' })).toBeDefined()
+  expect(w.shows.at(-1)!.verb).toBe('show')
 })
 
-test('a card with too few rows above its block opens over the rows below it', async ($, on) => {
-  world(on, { files: { '/project/app/shot.png': PNG } })
+test('in the compact view a picture Claude reads, and one you paste, is a chip with its name that opens in the window', COMPACT, async ($, on) => {
+  const folder = '/tmp/claude-501/-project-app/s-1/images'
+  const w = world(on, { files: { '/project/app/shot.png': PNG, [folder]: '', [`${folder}/1.png`]: PNG } })
   await startSession($)
-  // The answer's top scrolled away: no rows above it on screen to count on.
-  const row = await answer($, 'See shot.png here.\n\nAnd more.\n\nAnd more still.\n\nThe end.', 'a-1', { first: 1, last: 19, of: 20 })
-  for (const [i, rows] of [2, 4, 4, 4].entries()) await row.post({ rows }, { in: `probe:${i}` })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toMatchObject({ props: { top: 2 } })
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const read = await resultRow($, 'tu-1', image(PNG))
+  expect(await read.find({ type: 'Image' })).toBeUndefined()
+  const chip = (await read.findAll({ type: 'Client' })).find(client => String(client.key).startsWith('ref:'))!
+  expect(chip).toMatchObject({ props: { props: { label: 'shot.png' } } })
+  await read.pointer({ type: 'enter', x: 0, y: 0, in: String(chip.key) })
+  await w.clock.advance(50)
+  expect(shown(w)).toEqual(['/project/app/shot.png'])
+  const sent = (requestId: string) => $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'UserMessage', requestId, props: { text: 'look [Image #1]', origin: { kind: 'composer' }, isExpanded: false }, viewport: SCREEN })
+  await sent('m-1')
+  await w.clock.advance(4000)
+  const message = await sent('m-2')
+  expect(await message.find({ type: 'Image' })).toBeUndefined()
+  expect((await message.findAll({ type: 'Client' })).map(client => client.props.props)).toEqual([{ label: '[Image #1]' }])
+})
+
+test('the compact view needs the fullscreen interface and a window: elsewhere the pictures are drawn', COMPACT, async ($, on) => {
+  world(on, { uname: 'Linux', env: { TERM_PROGRAM: 'ghostty' }, files: { '/project/app/shot.png': PNG } })
+  await startSession($)
+  const row = await resultRow($, 'tu-1', image(PNG))
+  expect(await row.find({ type: 'Image' })).toBeDefined()
+  expect(await row.findAll({ type: 'Client' })).toEqual([])
 })
 
 test('a picture embedded in an answer shows under its paragraph, its markdown not written as well', async ($, on) => {
@@ -543,7 +574,7 @@ test('a picture shown as code is left as code: in a fence and in a code span', a
   expect(await plain.find({ type: 'Image' })).toBeUndefined()
   // An answer the mod draws (it names shot.png): its code is drawn whole, no picture taken out of it.
   const drawn = await answer($, `The README starts:\n\n${fence}\n\nand \`![logo](docs/logo.png)\` stays, see shot.png.`, 'a-2')
-  expect(await drawn.find({ type: 'Image' })).toBeUndefined()
+  expect((await drawn.findAll({ type: 'Image' })).map(image => image.props.alt)).toEqual(['shot.png'])
   expect((await drawn.findAll({ type: 'Markdown' })).map(block => block.props.text)).toEqual(['The README starts:', fence, 'and `![logo](docs/logo.png)` stays, see shot.png.'])
 })
 
@@ -557,15 +588,17 @@ test('a Read row shows the bytes Claude read once its file has changed', async (
   expect(w.runs.find(run => run.argv[2]?.includes('base64 --decode >'))?.stdin).toBe(PNG)
 })
 
-test('a picture Claude writes after answering gets its chip, once the index is old', async ($, on) => {
+test('a picture Claude writes after answering is drawn, once the index is old', async ($, on) => {
   const w = world(on, { tracked: ['src/index.ts'] })
   await startSession($)
   const text = 'Saved it as `demo.gif`.'
-  expect(await (await answer($, text, 'a-1')).find({ key: 'ref:0' })).toBeUndefined()
+  expect(await (await answer($, text, 'a-1')).find({ key: 'engine' })).toBeDefined()
   w.tracked.push('docs/media/demo.gif')
   w.files['/project/app/docs/media/demo.gif'] = gif([0, 1]).toBase64()
   await w.clock.advance(4000)
-  expect(await (await answer($, text, 'a-2')).find({ key: 'ref:0' })).toMatchObject({ props: { props: { label: 'demo.gif' } } })
+  const row = await answer($, text, 'a-2')
+  await w.clock.advance(10)
+  expect(await row.find({ type: 'Image' })).toMatchObject({ props: { alt: 'demo.gif' } })
 })
 
 test('over ssh the terminal is sent the picture; under tmux it is drawn in cells', async ($, on) => {
@@ -591,37 +624,6 @@ test('a small picture is not enlarged to convert it, and takes the cells of its 
   const converted = w.runs.find(run => run.argv[0] === 'sips' && run.argv[1] === '-s')
   expect(converted?.argv).not.toContain('-Z')
   expect(await row.find({ type: 'Image' })).toMatchObject({ props: { columns: 8, rows: 4 } })
-})
-
-test('a card over an answer with rows under it stays on its rows, not above the screen', async ($, on) => {
-  world(on, { files: { '/project/app/shot.png': PNG } })
-  await startSession($)
-  const row = await answer($, 'See shot.png.', 'a-1', { first: 0, last: 0, of: 1 })
-  await row.post({ rows: 1 }, { in: 'probe:0' })
-  // A later row under it: the answer is not at the foot of the screen.
-  await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'UserMessage', requestId: 'm-2', props: { text: 'and then?', origin: { kind: 'composer' }, isExpanded: false }, viewport: SCREEN })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toBeUndefined()
-})
-
-test('the newest answer, at the foot of the screen, opens its card over the rows above it', async ($, on) => {
-  world(on, { files: { '/project/app/shot.png': PNG } })
-  await startSession($)
-  const row = await answer($, 'See shot.png.', 'a-1', { first: 0, last: 0, of: 1 })
-  await row.post({ rows: 1 }, { in: 'probe:0' })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toMatchObject({ props: { top: -4 } })
-})
-
-test('a card waits for every block above its chip to be measured', async ($, on) => {
-  world(on, { files: { '/project/app/shot.png': PNG } })
-  await startSession($)
-  const row = await answer($, 'First.\n\nSecond.\n\nI saved it as shot.png.', 'a-1', { first: 0, last: 9, of: 10 })
-  await row.post({ rows: 1 }, { in: 'probe:2' })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toBeUndefined()
-  for (const [i, rows] of [2, 2].entries()) await row.post({ rows }, { in: `probe:${i}` })
-  expect(await row.find({ key: 'card' })).toMatchObject({ props: { top: 2 } })
 })
 
 // --- Lighter on the engine, the memory and the disk.
@@ -672,16 +674,7 @@ test('one picture embedded twice is two Images, each with a key of its own', asy
   expect(new Set(keys).size).toBe(2)
 })
 
-test('an answer with pictures but no chips mounts no probes', async ($, on) => {
-  world(on, { files: { '/project/app/out/chart.png': PNG, '/project/app/shot.png': PNG } })
-  await startSession($)
-  const embedded = await answer($, 'Here:\n\n![chart](out/chart.png)', 'a-1')
-  expect(await embedded.find({ key: 'probe:0' })).toBeUndefined()
-  const named = await answer($, 'Saved as shot.png.', 'a-2')
-  expect(await named.find({ key: 'probe:0' })).toBeDefined()
-})
-
-test("a chip's picture is read before the pointer comes onto it", async ($, on) => {
+test("a chip's picture is read before the pointer comes onto it", COMPACT, async ($, on) => {
   const w = world(on, { files: { '/project/app/shot.png': PNG } })
   await startSession($)
   await answer($, 'Saved as shot.png.', 'a-1')
@@ -733,17 +726,14 @@ test('by default a click opens nothing: a picture the terminal draws takes no re
   expect(w.runs.some(run => run.argv[0] === 'open')).toBe(false)
 })
 
-test('by default a click on a picture in cells, or on a chip, opens nothing', async ($, on) => {
+test('by default a click on a picture in cells opens nothing', async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
   await startSession($)
   await readRow($, 'tu-1', '/project/app/shot.png')
   const row = await resultRow($, 'tu-1', image(PNG))
   const region = (await row.findAll({ type: 'Client' })).find(client => String(client.key).startsWith('open:'))!
   await row.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: String(region.key) })
-  await row.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: String(region.key) })
-  const answered = await answer($, 'Saved as shot.png.', 'a-1')
-  await answered.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: 'ref:0' })
-  await answered.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: 'ref:0' })
+  await row.pointer({ type: 'enter', x: 0, y: 0, in: String(region.key) })
   await w.clock.advance(50)
   expect(w.runs.some(run => run.argv[0] === 'open')).toBe(false)
   // The window stays: the pointer is still on the picture.
@@ -894,19 +884,6 @@ test('a stray backtick blanks no picture past its paragraph', async ($, on) => {
   expect(await row.find({ type: 'Image' })).toMatchObject({ props: { alt: 'chart.png' } })
 })
 
-test('/images off closes a card left open: on again, it does not come back', async ($, on) => {
-  world(on, { files: { '/project/app/shot.png': PNG } })
-  await startSession($)
-  const row = await answer($, 'Saved as shot.png.', 'a-1')
-  await row.post({ rows: 1 }, { in: 'probe:0' })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toBeDefined()
-  await images($, 'off')
-  await images($, 'on')
-  expect(await (await answer($, 'Saved as shot.png.', 'a-1b')).find({ key: 'card' })).toBeUndefined()
-  expect(await row.find({ key: 'card' })).toBeUndefined()
-})
-
 test('a session after /clear starts with pictures on, whatever /images set', async ($, on) => {
   const w = world(on)
   await startSession($)
@@ -946,7 +923,7 @@ test('a sent prompt shares the width among the pictures it draws, not one typed 
 
 // --- Lighter still: a streaming answer, a paste looked for long.
 
-test('an answer streaming in keeps one lookup a block, its chips those of the text as it stands', async ($, on) => {
+test('an answer streaming in keeps one lookup a block, its chips those of the text as it stands', COMPACT, async ($, on) => {
   world(on, { files: { '/project/app/a.png': PNG, '/project/app/b.png': PNG } })
   await startSession($)
   const props = (text: string) => ({ text, isFirstOfReply: true, onScreen: { first: 0, last: 9, of: 10 } })
@@ -1050,9 +1027,6 @@ async function pointPicture (row: Awaited<ReturnType<typeof resultRow>>, type: '
   await row.pointer({ type, x: 0, y: 0, in: String(region.key) })
 }
 
-/** What the window was told to show, in order: each picture's path, or none while it is made. */
-const shown = (w: ReturnType<typeof world>) => w.shows.filter(show => show.verb === 'show').map(show => show.path)
-
 test('in a terminal that draws cells, a picture under the pointer opens in the window, and the window closes as the pointer leaves', async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
   await startSession($)
@@ -1075,7 +1049,7 @@ test('in a terminal that draws cells, a picture under the pointer opens in the w
   expect(w.windows).toHaveLength(1)
 })
 
-test('going from one picture straight to the next shows the next: the leave of the first does not hide it', async ($, on) => {
+test('going from one picture straight to the next shows the next: the leave of the first does not hide it', COMPACT, async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/a.png': PNG, '/project/app/b.png': PNG } })
   await startSession($)
   const row = await answer($, '1. See a.png\n2. And b.png', 'a-1')
@@ -1102,25 +1076,21 @@ test('the session ending ends the window\'s program', async ($, on) => {
   expect(w.windows[0]!.isEnded).toBe(true)
 })
 
-test('in a terminal that draws cells, a chip opens its picture in the window, not a card of cells', async ($, on) => {
-  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
+test('in the compact view the window\'s program starts with the session, in a terminal that draws pictures too', COMPACT, async ($, on) => {
+  const w = world(on)
   await startSession($)
-  const row = await answer($, 'Saved as shot.png.', 'a-1')
-  await row.post({ rows: 1 }, { in: 'probe:0' })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  await w.clock.advance(50)
-  expect(shown(w)).toEqual(['/project/app/shot.png'])
-  expect(await row.find({ key: 'card' })).toBeUndefined()
+  await w.clock.advance(10)
+  expect(w.windows).toHaveLength(1)
 })
 
-test('a window that cannot show sends the pictures back to the terminal: a chip opens its card again', async ($, on) => {
-  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, window: 'error' })
+test('a window that cannot show sends the pictures back to the terminal: the compact view draws them', COMPACT, async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG }, window: 'error' })
   await startSession($)
   await w.clock.advance(10)
   const row = await answer($, 'Saved as shot.png.', 'a-1')
-  await row.post({ rows: 1 }, { in: 'probe:0' })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toBeDefined()
+  await w.clock.advance(10)
+  expect(await row.find({ key: 'ref:0' })).toBeUndefined()
+  expect(await row.find({ type: 'Image' })).toBeDefined()
   expect(w.windows).toHaveLength(1)
 })
 
@@ -1228,22 +1198,17 @@ test('in a remote app a picture that is not there draws nothing, and an answer t
 
 // --- What the review of 0.4.0 found, each kept fixed.
 
-test("a picture the window cannot read loses its window alone: the next one still opens in one", async ($, on) => {
+test("a picture the window cannot read loses its window alone: the next one still opens in one", COMPACT, async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/a.png': PNG, '/project/app/b.png': PNG }, window: 'unreadable' })
   await startSession($)
   const row = await answer($, '1. See a.png\n2. And b.png', 'a-1')
-  for (const [i, rows] of [1, 1].entries()) await row.post({ rows }, { in: `probe:${i}` })
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
   await w.clock.advance(50)
-  await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
+  // The first is not tried again: drawn now, its chip gone (and the second keeps its own).
+  expect(await row.find({ key: 'ref:0' })).toBeUndefined()
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:1' })
   await w.clock.advance(50)
   expect(shown(w)).toEqual(['/project/app/a.png', '/project/app/b.png'])
-  // And the first is not tried again.
-  await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:1' })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  await w.clock.advance(50)
-  expect(shown(w)).toHaveLength(2)
 })
 
 test('a picture pointed at while the window\'s program starts shows once it is ready; one left meanwhile never does', async ($, on) => {
@@ -1261,7 +1226,7 @@ test('a picture pointed at while the window\'s program starts shows once it is r
   expect(shown(w)).toEqual(['/project/app/shot.png'])
 })
 
-test('a chip opens its window at once, before its picture is read', async ($, on) => {
+test('a chip opens its window at once, before its picture is read', COMPACT, async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
   await startSession($)
   const row = await answer($, 'Saved as shot.png.', 'a-1')
@@ -1357,7 +1322,7 @@ test('a pointer that leaves while the show is on its way leaves no window open: 
   expect(shown(w)).toEqual([])
 })
 
-test('going from one picture to the next before the first is shown shows the second, not the first', async ($, on) => {
+test('going from one picture to the next before the first is shown shows the second, not the first', COMPACT, async ($, on) => {
   const w = world(on, { uname: 'Linux', env: WSL, files: { '/home/me/a.png': PNG, '/home/me/b.png': PNG } })
   await startSession($)
   await w.clock.advance(10)
@@ -1371,32 +1336,28 @@ test('going from one picture to the next before the first is shown shows the sec
   expect(shown(w)).toEqual([toWindows('/home/me/b.png')])
 })
 
-test('a picture whose path has no Windows form is left to the terminal: no spinner left in the window, and its chip opens a card', async ($, on) => {
+test('a picture whose path has no Windows form is left to the terminal: no spinner left in the window, and its chip draws the picture', COMPACT, async ($, on) => {
   const w = world(on, { uname: 'Linux', env: WSL, files: { '/nowin/shot.png': PNG } })
   await startSession($)
   const row = await answer($, 'Saved as /nowin/shot.png.', 'a-1')
-  await row.post({ rows: 1 }, { in: 'probe:0' })
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
   await w.clock.advance(100)
   expect(shown(w).filter(path => path === '')).toEqual([])
-  await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toBeDefined()
+  expect(await row.find({ key: 'ref:0' })).toBeUndefined()
+  expect(await row.find({ type: 'Raster' })).toBeDefined()
 })
 
-test('a chip whose picture the window cannot read opens its card the next time', async ($, on) => {
-  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, window: 'unreadable' })
+test('a chip whose picture the window cannot read draws the picture instead', COMPACT, async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG }, window: 'unreadable' })
   await startSession($)
   const row = await answer($, 'Saved as shot.png.', 'a-1')
-  await row.post({ rows: 1 }, { in: 'probe:0' })
   await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
   await w.clock.advance(100)
-  await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toBeDefined()
+  expect(await row.find({ key: 'ref:0' })).toBeUndefined()
+  expect(await row.find({ type: 'Image' })).toBeDefined()
 })
 
-test('a hover as the session starts, before its program is up, starts one program, and the picture shows', async ($, on) => {
+test('a hover as the session starts, before its program is up, starts one program, and the picture shows', COMPACT, async ($, on) => {
   const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
   await startSession($)
   const row = await answer($, 'Saved as shot.png.', 'a-1')
@@ -1418,19 +1379,19 @@ test("a session that ends tells its program to quit, in a file no later program 
   expect(w.windows.at(-1)!.env.INLINE_IMAGES_COMMANDS).not.toBe(first)
 })
 
-test('a program that keeps ending on its own sends the pictures back to the terminal: a chip opens its card', async ($, on) => {
-  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, window: 'crash' })
+test('a program that keeps ending on its own sends the pictures back to the terminal: the chips draw them', COMPACT, async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG }, window: 'crash', tui: null })
   await startSession($)
   const row = await answer($, 'Saved as shot.png.', 'a-1')
-  await row.post({ rows: 1 }, { in: 'probe:0' })
   for (let i = 0; i < 4; i++) {
     await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
     await w.clock.advance(100)
+    if (!(await row.find({ key: 'ref:0' }))) break
     await row.pointer({ type: 'leave', x: 0, y: 0, in: 'ref:0' })
   }
   expect(w.windows).toHaveLength(3)
-  await row.pointer({ type: 'enter', x: 0, y: 0, in: 'ref:0' })
-  expect(await row.find({ key: 'card' })).toBeDefined()
+  expect(await row.find({ key: 'ref:0' })).toBeUndefined()
+  expect(await row.find({ type: 'Image' })).toBeDefined()
 })
 
 test('pressed on a picture, dragged off it and let go outside, the window closes', async ($, on) => {
@@ -1546,7 +1507,7 @@ test('a block that is indented code keeps its indent', async ($, on) => {
   expect((await row.findAll({ type: 'Markdown' })).map(block => block.props.text)).toEqual(['Saved shot.png:', '    convert shot.png out.png'])
 })
 
-test('a picture named after a very long word still gets its chip', async ($, on) => {
+test('a picture named after a very long word still gets its chip', COMPACT, async ($, on) => {
   world(on, { files: { '/project/app/after.png': PNG } })
   await startSession($)
   const row = await answer($, `${'a'.repeat(20000)} then after.png`, 'a-1')

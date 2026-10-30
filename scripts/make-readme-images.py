@@ -1,8 +1,6 @@
 """Draws the README's pictures, illustrations of what the mod does, in the icon's palette:
 
 - docs/demo.gif: a Claude Code transcript where Claude reads a GIF, the GIF playing under its row;
-- docs/chips.png: an answer that names pictures, a chip beside each, the card of the one under the
-  pointer open over the rows above;
 - docs/pixels-and-cells.png: one picture as Ghostty and kitty draw it, and in cells, as any other
   terminal with true color does.
 
@@ -12,7 +10,7 @@ import math
 import os
 import random
 import sys
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 from art import GREEN, INK, MUTED, ORANGE, WINDOW, gradient, mono, rounded_mask, scene
 
@@ -127,59 +125,6 @@ def demo():
     out[0].save(os.path.join(OUT, 'demo.gif'), save_all=True, append_images=out[1:], duration=90, loop=0, optimize=False, disposal=1, transparency=clear)
 
 
-# --- docs/chips.png: the chips beside an answer, the card of the hovered one open.
-HOVERED = 1
-
-
-def chips():
-    W, H = 900 * X, 520 * X
-    img, d, (x, y) = window(W, H, '~/site — claude')
-    user_row(img, d, x, y, 'which pictures does the README use?')
-    y += LINE * 2
-    text(d, x, y, [('● ', GREEN), ('Search', INK), ('(pattern: "docs/media/*")', MUTED)])
-    y += LINE
-    result(d, x, y, 'Found 3 files')
-    y += LINE * 1.5
-    text(d, x, y, [('● ', GREEN), ('Read', INK), ('(README.md)', MUTED)])
-    y += LINE
-    result(d, x, y, 'Read 214 lines')
-    y += LINE * 2
-    text(d, x, y, [('● ', INK), ('It uses three, all in ', INK), ('docs/media/', ORANGE), (':', INK)])
-    y += LINE * 1.5
-    items = [('sunset.gif', 'the hero, the sun sinking'), ('neon-grid.png', 'the section headers'), ('mountains.jpg', 'the footer')]
-    chip_x = W - 24 * X - FONT.getlength('neon-grid.png') - 8 * X
-    rows = []
-    for n, (name, what) in enumerate(items, 1):
-        text(d, x + CELL * 2, y, [(f'{n}. ', INK), (name, ORANGE), (f' — {what}', INK)])
-        rows.append(y)
-        hovered = n == HOVERED
-        label_w = d.textlength(name, font=FONT)
-        if hovered:
-            d.rectangle((chip_x - 3 * X, y - LINE * 0.42, chip_x + label_w + 3 * X, y + LINE * 0.42), fill=ORANGE)
-        d.text((chip_x, y), name, font=FONT, fill=DARK_INK if hovered else ORANGE, anchor='lm')
-        y += LINE
-    prompt_box(img, d, x - 6 * X, H - 60 * X, W - 2 * x + 12 * X)
-
-    # The card of the hovered chip: the picture and its path, over the rows above that item.
-    pw, ph = 372 * X, 150 * X
-    pic = sunset(pw, ph, 0.14)
-    card_w, card_h = pw + 2 * 10 * X, ph + 2 * 10 * X + LINE
-    cx0, cy1 = x + CELL * 2, rows[HOVERED - 1] - LINE / 2 - 4 * X
-    cy0 = cy1 - card_h
-    shadow = Image.new('RGBA', img.size, (0, 0, 0, 0))
-    ImageDraw.Draw(shadow).rounded_rectangle((cx0 + 6 * X, cy0 + 10 * X, cx0 + card_w + 6 * X, cy1 + 10 * X), 12 * X, fill=(4, 2, 12, 170))
-    img = Image.alpha_composite(img, shadow.filter(ImageFilter.GaussianBlur(12 * X)))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle((cx0, cy0, cx0 + card_w, cy1), 12 * X, fill=WINDOW, outline=(150, 132, 180), width=X)
-    img.paste(pic, (int(cx0 + 10 * X), int(cy0 + 10 * X)))
-    d.text((cx0 + 10 * X, cy1 - LINE / 2 - 4 * X), f'docs/media/{items[HOVERED - 1][0]}', font=FONT, fill=MUTED, anchor='lm')
-    # The pointer on the chip.
-    px, py = chip_x + d.textlength('sun', font=FONT), rows[HOVERED - 1] + 2 * X
-    arrow = [(0, 0), (0, 17), (4.5, 13), (7.5, 20), (10, 19), (7, 12.5), (12.5, 12.5)]
-    d.polygon([(px + ax * X * 1.2, py + ay * X * 1.2) for ax, ay in arrow], fill=INK, outline=(20, 10, 30))
-    finish(img).save(os.path.join(OUT, 'chips.png'), optimize=True)
-
-
 # --- docs/pixels-and-cells.png: the same picture in pixels and in cells.
 def in_cells(pic, cell_w):
     """The picture as a terminal draws it in text: each cell twice as tall as wide, an upper and a
@@ -215,5 +160,4 @@ def pixels_and_cells():
 
 os.makedirs(OUT, exist_ok=True)
 demo()
-chips()
 pixels_and_cells()

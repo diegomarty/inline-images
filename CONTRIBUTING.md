@@ -6,7 +6,7 @@ Thanks for helping. Inline Images is a Claude Code mod: a hooks module the engin
 
 - **Claude Code 2.1.308 or later.** It runs the mod, its validator and its tests.
 - **A terminal that draws pictures**, to see a change as most users will: Ghostty or kitty. Also check one that does not (Terminal.app, or Ghostty inside tmux), where pictures are drawn in cells.
-- **The fullscreen interface** (`"tui": "fullscreen"`) for anything that involves the pointer: chips, hover cards, clicks.
+- **The fullscreen interface** (`"tui": "fullscreen"`) for anything that involves the pointer: chips, the window by the pointer, clicks.
 - **A converter for pictures that are not PNG or GIF**: `sips` on macOS and PowerShell on Windows are built in; on Linux, ImageMagick.
 - **Python 3 with Pillow**, only if you change the icon or the README's illustrations.
 
@@ -34,7 +34,6 @@ Do not also install the mod from the marketplace while you run it from a folder:
 | `hooks/pixels.ts` | BMP parsing, and the painter that draws a picture in block-element cells |
 | `hooks/budget.ts` | The memory budget: least recently used, by bytes |
 | `hooks/chip.tsx` | The surface module of a chip and of a picture's click region |
-| `hooks/probe.tsx` | The surface module that measures each block of an answer |
 | `hooks/register.test.tsx` | The tests, run against the engine |
 | `types/index.d.ts` | The contract of the mod's `$.state` values |
 | `scripts/` | The icon and the README's illustrations, drawn with Pillow; `system-check.ts`, the system layer run for real |

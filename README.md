@@ -29,16 +29,13 @@
 
 ---
 
-A Claude Code mod: see pictures in the transcript, as the desktop app shows them. The images Claude reads, the ones you paste and the ones its answers embed are drawn under their rows; the ones an answer only names get a chip that shows the picture under the pointer; GIFs play.
+A Claude Code mod: see pictures in the transcript, as the desktop app shows them. The images Claude reads, the ones you paste and the ones its answers embed or name are drawn under their rows; GIFs play. Or, in the compact view, each is a chip with its name that opens the picture by the pointer.
 
 - **What Claude reads**: a `Read` of a PNG, JPEG, WebP or GIF shows the picture under its `⎿ Read image` line. A run of reads folded into one line (`Read 3 files`) shows each picture under it, named, and so does the same run unfolded (`--verbose`, or ctrl+o outside fullscreen).
 - **What you paste**: while you write, the pictures pasted in the draft show in a strip above the prompt, small, side by side, each named `[Image #N]`; sent, the prompt shows them under it. Where the strip is narrow it draws the pictures that fit, each name whole, and counts the rest (`+3 more`).
 - **What Claude embeds**: an answer with `![alt](path)` to a picture on this machine shows it under the paragraph that embeds it. Links to the web, and to files that are not there, draw nothing.
-- **What Claude names**: an answer that mentions a picture (`docs/media/leads.gif`, or just `leads.gif`) gets a chip beside the paragraph or list item that names it. Put the pointer on a chip and the picture opens in a card over the answer; move it off and the card closes. A name with no folder is looked for among the files under the working folder (`git ls-files`, ignored files left out); a name that matches no file gets no chip.
-
-<p align="center">
-  <img src="docs/chips.png" alt="Illustration: an answer lists three pictures, a chip beside each; the pointer on the first chip opens its picture in a card over the rows above" width="760">
-</p>
+- **What Claude names**: an answer that mentions a picture (`docs/media/leads.gif`, or just `leads.gif`) shows it under the paragraph or list item that first names it. A name with no folder is looked for among the files under the working folder (`git ls-files`, ignored files left out); a name that matches no file draws nothing.
+- **The compact view** (the **Compact view** option, off by default): every picture, read, pasted, embedded or named, is a chip with its name instead (`shot.png`, `[Image #1]`), an answer's beside the paragraph that first shows it. Put the pointer on a chip and the picture opens at full quality in the window by the pointer (below); move it off and the window closes. It needs the fullscreen interface and a window (not over ssh, nor on Linux with no display): elsewhere the pictures are drawn. A picture the window cannot show is drawn instead of its chip.
 
 - **GIFs play** while they show on screen, each frame for its own delay; scrolled away, they stop on the frame they were on.
 - **A click on a picture or a chip**, with the **Open on click** option on (it is off by default), opens it in the system's default viewer (`open` on macOS, `explorer` on Windows and under WSL, `xdg-open` on Linux): the file it was read from, or, for the bytes Claude was sent, the mod's copy of them. Clicks need the fullscreen interface.
@@ -51,7 +48,7 @@ A Claude Code mod: see pictures in the transcript, as the desktop app shows them
 | iTerm2 3.5 and later, in fullscreen | The picture itself, sent as its bytes, shrunk to 1024 pixels and 2 MB | — |
 | Any other (the VS Code terminal, Windows Terminal, Terminal.app, GNOME Terminal, Konsole, iTerm2 off fullscreen, tmux) | Colored cells, at half the rows | In the fullscreen interface, the picture at full quality, in a window of its own by the pointer |
 
-Where the terminal draws cells, each is sampled at eight by eight points, in linear light, and drawn with the block that splits them best, in any terminal with true color, GIFs too. Cells are coarse: a screenshot of text shows its layout, not text you can read. So the pictures take half the rows there, and a picture under the pointer (one drawn, or a chip's) opens at full quality in a small borderless window by the pointer, outside the terminal: above it and to its right, or where there is room, never over it. The window opens the moment the pointer comes, at the picture's size, a spinner in it, and the picture fills it once read: its program starts with the session, so there is no wait for it. It never takes the focus or the pointer, so you keep typing and hovering, and it closes as the pointer leaves. Each system draws it with what it has:
+Where the terminal draws cells, each is sampled at eight by eight points, in linear light, and drawn with the block that splits them best, in any terminal with true color, GIFs too. Cells are coarse: a screenshot of text shows its layout, not text you can read. So the pictures take half the rows there, and a picture under the pointer opens at full quality in a small borderless window by the pointer, outside the terminal: above it and to its right, or where there is room, never over it. The window opens the moment the pointer comes, at the picture's size, a spinner in it, and the picture fills it once read: its program starts with the session, so there is no wait for it. It never takes the focus or the pointer, so you keep typing and hovering, and it closes as the pointer leaves. Each system draws it with what it has:
 
 | System | The window | Needs |
 | --- | --- | --- |
@@ -92,8 +89,9 @@ It answers with how pictures are drawn now. A reload of the mod keeps what it se
 | --- | --- | --- |
 | Picture height | 12 | The most terminal rows a picture takes. |
 | Play GIFs | on | Off, a GIF shows its first frame. |
-| Pictures in answers | on | Show the local pictures an answer embeds, and a chip for each one it names. |
-| Preview in a window | on | Where the terminal draws cells, a picture or a chip under the pointer opens at full quality in a window by the pointer. Off, the cells are all. |
+| Pictures in answers | on | Show the local pictures an answer embeds or names. |
+| Preview in a window | on | Where the terminal draws cells, a picture under the pointer opens at full quality in a window by the pointer. Off, the cells are all. |
+| Compact view | off | Every picture is a chip with its name; the pointer on one opens the picture in the window by the pointer. |
 | Open on click | off | A click on a picture or a chip opens it in the system's default viewer. |
 
 ## Install
@@ -127,10 +125,10 @@ The repository is private for now: adding it needs access to it, and git signed 
 - A picture that cannot be read says why once, and is not tried again on every redraw.
 - What the mod keeps in memory (pictures read, their cells) stays within 112 MB together; past it the least recently shown go first, and are read again when next drawn. A picture on screen, or a GIF playing, never goes: with more on screen than fits, the budget is passed rather than a picture read again and again. A GIF that goes takes its frames off the disk too; the rest of the session's cache goes when the session ends.
 - Its copies on disk (converted pictures, GIF frames) are in `<temp folder>/inline-images/<session id>`, removed when the session ends; a session's left behind (by a crash) goes a week later.
-- The pictures a chip names are read as the answer draws (up to 8 an answer, of 2 MB or less), so the card has its picture as soon as the pointer comes onto the chip.
-- The chips need the pointer, so Claude Code's fullscreen interface (`"tui": "fullscreen"` in your settings, or `/config`). The card opens over the rows above the chip's block, or below it where the rows above are too few, up to 24 for the picture.
-- To put the chips beside their blocks, the mod draws such an answer itself, block by block, with the markdown renderer the engine draws replies with: an answer with no picture in it is the engine's as ever. Off fullscreen the engine draws it, the embedded pictures under it.
-- Hovering the name inside the answer itself cannot open the card: the mod is not told where each word of an answer lands once it wraps, so the chips stand beside its block.
+- In the compact view the pictures of an answer's chips are read as the answer draws (up to 8 an answer, of 2 MB or less), so the window has the picture's size as soon as the pointer comes onto the chip.
+- The chips need the pointer, so Claude Code's fullscreen interface (`"tui": "fullscreen"` in your settings, or `/config`).
+- To put each picture under (or its chip beside) the block that shows it, the mod draws such an answer itself, block by block, with the markdown renderer the engine draws replies with: an answer with no picture in it is the engine's as ever. Off fullscreen the engine draws it, the pictures under it.
+- Hovering the name inside the answer itself cannot open the window: the mod is not told where each word of an answer lands once it wraps, so the chips stand beside its block.
 - It covers what [Image Preview](https://github.com/midudev/better-claude/tree/main/plugins/image-preview) shows in a terminal that draws pictures (the draft's pictures, and the sent prompt's), drawn in place where Image Preview opens a card under the pointer: with this mod there is no need for that one. What it does not do is Image Preview's window of its own, at full quality, for a terminal that cannot draw pictures (Warp, iTerm2, Terminal.app, VS Code): there this mod draws cells. The two together have not been tried; both draw a strip above the prompt.
 
 ## How it works
@@ -138,10 +136,10 @@ The repository is private for now: adding it needs access to it, and git signed 
 One hooks module ([`hooks/register.tsx`](hooks/register.tsx)), a GIF decoder ([`hooks/gif.ts`](hooks/gif.ts)) and the cell painter ([`hooks/pixels.ts`](hooks/pixels.ts), from Image Preview):
 
 - An `AbovePrompt` hook draws the draft's strip from a list of its `[Image #N]`, kept by `prompt.edit` (a key, a paste) and `prompt.change` (every other change of the box: a recalled entry, a submit or a clear, a plugin's fill).
-- `ui.render` hooks on `ToolResult` and `ToolGroup` (Read calls whose output is an image), `UserMessage` (the `[Image #N]` of a sent prompt) and `AssistantMessage` (markdown images, and the pictures an answer names) draw the engine's row, then the pictures or chips under it.
+- `ui.render` hooks on `ToolResult` and `ToolGroup` (Read calls whose output is an image), `UserMessage` (the `[Image #N]` of a sent prompt) and `AssistantMessage` (markdown images, and the pictures an answer names) draw the engine's row, then the pictures (or, in the compact view, chips) under it.
 - On the VS Code extension, the desktop and mobile apps, which have no `Image`, an `AssistantMessage` hook draws the answer's local pictures under the app's own drawing of it, each an `Svg` with the picture inside as a data URI.
 - Where the terminal draws cells, the session starts a window's program ([`hooks/window.ts`](hooks/window.ts)) with `$.process.spawn`, one for the session. The mod tells it what to show in a file (`$.fs.write`), which it reads every 40 milliseconds: a picture, with its size (the window opens with a spinner, then the picture fills it), or to hide the window, or to end. It says `ready`, `shown` for each picture, and a `.` every tenth of a second, so it ends when the session no longer reads it.
-- Each chip is a `Client` ([`hooks/chip.tsx`](hooks/chip.tsx), as in Image Preview) that posts when the pointer comes onto it, leaves it and clicks it; a `ui.message` hook keeps which chip has the pointer, and the answer draws the card last, `position: "absolute"`, over the rows above the chip's block (or below it, where the rows above are too few), so nothing moves under the pointer and no block paints over it. Where each block is comes from a probe in it ([`hooks/probe.tsx`](hooks/probe.tsx)), an unpainted `Client` as tall as its block, that says how many rows it was laid out in.
+- Each chip is a `Client` ([`hooks/chip.tsx`](hooks/chip.tsx), as in Image Preview) that posts when the pointer comes onto it, leaves it and clicks it; a `ui.message` hook opens its picture in the window by the pointer, and closes it. Nothing is drawn in the transcript, so nothing moves under the pointer.
 - Each picture is read once, in the background: a GIF is decoded into frames ([`hooks/gif.ts`](hooks/gif.ts)) and each written to a raw RGBA file; a PNG is drawn from its file, or decoded ([`hooks/png.ts`](hooks/png.ts), with its own inflate) to be drawn in cells or sent as pixels; any other picture from a PNG or BMP a converter writes. What it asks of the system (folders, bytes, conversions, the viewer) goes through [`hooks/system.ts`](hooks/system.ts), a way for each system. The rows that wait on it draw again.
 - A GIF is a keyed `Image` (or `Raster`, in cells); `$.ui.blit` swaps its frame after each delay, with no redraw. A row reported off screen stops its animation.
 

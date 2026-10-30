@@ -7,14 +7,13 @@ import { parseBmp, toCells } from './pixels'
 import { decodePng, isPng } from './png'
 import { canShowWindows, convert, detect, makeFolder, open as openFile, readBytes, remove, tempFolder, touch, windowCommand, windowPath, windowReads, writeBytes, writeFrames } from './system'
 import type { Pixels } from './pixels'
-import type { Hovered, Picture, View } from '../types'
+import type { Picture, View } from '../types'
 
 type Engine = EngineInterface
 type RenderOf<C extends string> = Extract<EventOf['ui.render'], { component: C, surface: 'terminal' }>
 type Ui = Elements['terminal']
 
 const pictures = atom({ plugin: 'inline-images', key: 'pictures' } as const, {} as Record<string, Picture>)
-const hovered = atom({ plugin: 'inline-images', key: 'hovered' } as const, null as Hovered | null)
 const draft = atom({ plugin: 'inline-images', key: 'draft' } as const, [] as number[])
 const view = atom({ plugin: 'inline-images', key: 'view' } as const, { isOn: true, size: 'medium' } as View)
 
@@ -92,13 +91,6 @@ const TOUCH_MS = 6 * 60 * 60 * 1000
 const REFERENCE = /\]\(\s*<?([^)\s>]+\.(?:png|jpe?g|gif|webp))>?[^)]*\)|`([^`\n]+\.(?:png|jpe?g|gif|webp))`|(?<![\w@%+.~:\\/-])((?:[A-Za-z]:)?(?:~|\.{1,2})?[\\/]?[\w@%+.-]+(?:[\\/][\w@%+.-]+)*\.(?:png|jpe?g|gif|webp))(?![\w\\/])/gi
 const WEB_LINK = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi
 const MAX_REFERENCES = 24
-// The card a chip opens: the most rows its picture takes, and what the border and caption add.
-const HOVER_ROWS = 24
-const CARD_ROWS = 3
-const MIN_CARD_ROWS = 6
-// What the screen keeps under the transcript: the prompt and the lines around it.
-const BOTTOM_ROWS = 8
-
 /** What the terminal is shown of a picture, frame by frame: an Image's sources, or pixels to draw in cells. */
 type Loaded = { sources?: ImageSource[]; pixels?: Pixels[]; href?: Href; delays: number[] }
 /** A picture as an Svg holds it: a data URI, and the picture's own size. */
@@ -156,7 +148,7 @@ let touchTimer: Timer | undefined
 // and when that was last looked at.
 const checked = new Map<string, { file: string; mtime: number; at: number }>()
 const cells = new Budget<string>(CELLS_BUDGET)
-// The files of the chips already read, or let be, before the pointer came onto one.
+// The pictures of the chips already read, or let be, before the pointer came onto one.
 const prefetched = new Set<string>()
 // The file each picture was read from (for one Claude was sent, the copy written of it), by key; and
 // the picture under each picture's click region, by `<requestId>/<region key>`.
@@ -169,13 +161,8 @@ const references = new Map<string, { text: string; at: number; found: Promise<{ 
 const MAX_KNOWN = 1000
 // The image files under the working folder, and when they were listed.
 let index: { at: number; files: Promise<string[]> } | undefined
-// The order transcript rows were first drawn in: the newest is the one at the foot of the screen.
-const rowOrder = new Map<string, number>()
-// The file each chip names, by `<requestId>/<chip key>`; and where the answer showing the card was when it opened.
-const chipFiles = new Map<string, string>()
-let hoveredAt: string | undefined
-// How many rows each block of an answer was laid out in, by the answer's requestId, as its probes said.
-const blockRows = new Map<string, number[]>()
+// The picture each chip stands for, by `<requestId>/<chip key>`: its key, and the file it names (an answer's chip).
+const chips = new Map<string, { key: string; file?: string }>()
 // The folder each GIF's frames are written in, by key; those of GIFs dropped from memory, to remove;
 // and how many have been written, so a GIF read again writes a folder of its own.
 const frameDirs = new Map<string, string>()
@@ -296,8 +283,7 @@ function reset () {
   for (const play of playing.values()) play.timer?.cancel()
   playing.clear()
   references.clear()
-  blockRows.clear()
-  rowOrder.clear()
+  chips.clear()
   prefetched.clear()
   sourceFiles.clear()
   openers.clear()
@@ -327,6 +313,17 @@ function forget (key: string) {
 /** Whether a picture under the pointer opens in a window: a terminal that draws cells, on a desktop. */
 const isWindowing = () => canWindow && graphics === 'none'
 
+/**
+ * Whether pictures show as chips, each opening in the window as the pointer comes onto it: the
+ * Compact view option, where there is a pointer (fullscreen) and a window to open.
+ */
+const isCompact = (viewport?: { isFullscreen?: boolean }) => compact && canWindow && viewport?.isFullscreen !== false
+
+/** A window lost, for one picture or for all: the chips that stood for them draw the pictures instead. */
+function loseWindow ($: Engine) {
+  if (compact) $.ui.invalidate('ui.render')
+}
+
 /** Settles iTerm2's way at the first drawing: pixels in fullscreen, cells elsewhere. */
 function settle (e: { surface: string; viewport?: { isFullscreen?: boolean } }) {
   if (!isItermPending || e.surface !== 'terminal' || e.viewport === undefined) return
@@ -352,6 +349,7 @@ async function launchHost ($: Engine) {
   if (hostStarts >= WINDOW_STARTS) {
     canWindow = false
     $.ui.log(`inline-images: no window (its program ended ${WINDOW_STARTS} times); the terminal shows the pictures`, { to: 'debug' })
+    loseWindow($)
     return undefined
   }
   hostStarts++
@@ -392,6 +390,7 @@ async function readHost ($: Engine, running: Host) {
           noWindow.add(key)
           if (windowKey === key) windowKey = undefined
           $.ui.log(`inline-images: no window for ${baseName(sourceFiles.get(key) ?? key)} (${failed![2]})`, { to: 'debug' })
+          loseWindow($)
         } else if (line.startsWith('error') && said.length < 2000) said += `${line}\n`
       }
     }
@@ -405,6 +404,7 @@ async function readHost ($: Engine, running: Host) {
   if (running.isReady && !/^error: /m.test(said)) return
   canWindow = false
   $.ui.log(`inline-images: no window (${said.trim().slice(0, 300) || 'the program could not start'}); the terminal shows the pictures`, { to: 'debug' })
+  loseWindow($)
 }
 
 /**
@@ -465,9 +465,12 @@ async function openWindow ($: Engine, key: string, given?: string) {
   const path = file && (await windowPath($, file))
   if (path) return tell($, 'show', key, path, width, height)
   if (windowKey !== key) return
-  noWindow.add(key)
   windowKey = undefined
+  // Still being read (a chip's picture, the pointer quick): no window this time, one the next.
+  if (!file && loading.has(key)) return
+  noWindow.add(key)
   await tell($, 'hide')
+  loseWindow($)
 }
 
 /** Closes the window. */
@@ -537,14 +540,6 @@ async function sweepOld ($: Engine) {
 async function touchCache ($: Engine) {
   if (cache) await touch($, cache)
 }
-
-/** Notes a transcript row the first time it is drawn. */
-function noteRow (requestId: string) {
-  if (!rowOrder.has(requestId)) rowOrder.set(requestId, rowOrder.size)
-}
-
-/** Whether a row is the newest drawn: the transcript's last, at the foot of the screen. */
-const isNewest = (requestId: string) => rowOrder.get(requestId) === rowOrder.size - 1
 
 /** A PNG's width and height, from its header. */
 function pngSize (bytes: Uint8Array) {
@@ -904,15 +899,17 @@ function play ($: Engine, requestId: string, element: string, key: string, colum
   return started.frame
 }
 
-type Site = { ui: Ui; requestId: string; maxColumns: number; maxRows: number; isShown: boolean; animate: boolean; canPoint: boolean }
+type Site = { ui: Ui; requestId: string; maxColumns: number; maxRows: number; isShown: boolean; animate: boolean; canPoint: boolean; isCompact: boolean }
 
 // The options: the most rows a picture takes, and whether GIFs play. And what `/images` set: whether
 // pictures are drawn at all, and the most rows small and large ones take (medium: the option's).
 let optionRows = 12
 let maxRows = 12
 let animate = true
-// Whether a click on a picture or a chip opens it in the system's viewer (the Open on click option).
+// Whether a click on a picture or a chip opens it in the system's viewer (the Open on click option),
+// and whether pictures show as chips (the Compact view option).
 let clickOpens = false
+let compact = false
 let isOn = true
 const SIZE_ROWS = { small: 6, large: 24 }
 const START_VIEW: View = { isOn: true, size: 'medium' }
@@ -944,13 +941,18 @@ function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessag
     animate,
     // The pointer reaches a picture in fullscreen alone; it is wanted there to open a window, or for
     // a click where clicks open pictures.
-    canPoint: e.viewport?.isFullscreen !== false && (isWindowing() || clickOpens)
+    canPoint: e.viewport?.isFullscreen !== false && (isWindowing() || clickOpens),
+    isCompact: isCompact(e.viewport)
   }
 }
 
-/** One picture, as large as the site allows: the picture itself, or a dim line while it loads or where it cannot be read. */
+/**
+ * One picture, as large as the site allows: the picture itself, or a dim line while it loads or where
+ * it cannot be read. In the compact view, a chip that opens it in the window.
+ */
 function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: string, label: string, slot = 'image'): RenderElement {
   const { ui: { Box, Client, Image, Raster, Text }, requestId } = site
+  if (site.isCompact && !noWindow.has(key)) return chipOf(site, key, label, `ref:${slot}:${nameOf(key)}`)
   const picture = all[key]
   const frames = loaded.get(key)
   if (key.startsWith('file:')) void recheck($, key).catch(() => undefined)
@@ -980,51 +982,16 @@ function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: st
   )
 }
 
-/** A text exactly `width` cells wide: cut with an ellipsis, or padded with spaces. */
-const fill = (text: string, width: number) => (text.length > width ? `${text.slice(0, Math.max(0, width - 1))}…` : text.padEnd(width))
-
-// The narrowest a card is, so its caption reads.
-const MIN_CARD_COLUMNS = 24
-
-/**
- * A picture in a bordered card, its path under it. It floats over the answer, which shows through any
- * cell it leaves unwritten: every line is written to the card's width, spaces and all, and the card
- * is no wider than the picture (or its caption, up to a point).
- */
-function cardOf ($: Engine, site: Site, all: Record<string, Picture>, key: string, caption: string): [RenderElement, number] {
-  const { Box, Text } = site.ui
-  const picture = all[key]
-  const label = baseName(caption)
-  const isShown = picture && !('error' in picture) && loaded.has(key)
-  const columns = isShown ? fitCells(picture.width, picture.height, site.maxColumns, site.maxRows).columns : 0
-  const rows = isShown ? fitCells(picture.width, picture.height, site.maxColumns, site.maxRows).rows : 0
-  const width = Math.min(site.maxColumns, Math.max(columns, Math.min(caption.length, MIN_CARD_COLUMNS)))
-  // A caption wider than the card names the file alone.
-  const name = caption.length > width ? label : caption
-  const side = (n: number) => n > 0 && <Text>{Array.from({ length: rows }, () => ' '.repeat(n)).join('\n')}</Text>
-  const left = Math.floor((width - columns) / 2)
-  // The border's two rows, the caption's, and the picture's (or the line saying why there is none).
-  const height = 3 + (isShown ? rows : 1)
-  return [(
-    <Box key="frame" flexDirection="column" borderStyle="round" borderDimColor flexShrink={0} width={width + 2}>
-      {!isShown
-        ? <Text dimColor>{fill(picture && 'error' in picture ? `${label}: no preview, ${picture.error}` : `${label} loading…`, width)}</Text>
-        : (
-          <Box flexDirection="row">
-            {side(left)}
-            {pictureOf($, site, all, key, label, 'card')}
-            {side(width - columns - left)}
-          </Box>
-          )}
-      <Text dimColor>{fill(name, width)}</Text>
-    </Box>
-  ), height]
+/** A chip naming a picture (`file`, an answer's): the pointer on it opens the picture in the window, a click (where clicks open) in the system's viewer. */
+function chipOf (site: Site, key: string, label: string, element: string, file?: string): RenderElement {
+  chips.set(`${site.requestId}/${element}`, { key, file })
+  return <site.ui.Client key={element} module="./chip.tsx" props={{ label }} />
 }
 
 /**
  * Pasted pictures side by side, each in its share of the width, and in the strip its `[Image #N]`
- * under it: as many as fit, the rest counted. One with no picture behind it (an [Image #N] typed by
- * hand) draws nothing; one that cannot be read says why.
+ * under it (in the compact view, a chip of each): as many as fit, the rest counted. One with no
+ * picture behind it (an [Image #N] typed by hand) draws nothing; one that cannot be read says why.
  */
 function pastedRow ($: Engine, site: Site, all: Record<string, Picture>, ids: number[], isNamed: boolean): RenderElement | undefined {
   const { Box, Text } = site.ui
@@ -1032,7 +999,7 @@ function pastedRow ($: Engine, site: Site, all: Record<string, Picture>, ids: nu
   if (shown.length === 0) return undefined
   const label = (id: number) => `[Image #${id}]`
   const more = (n: number) => `+${n} more`
-  const least = isNamed ? Math.max(...shown.map(id => label(id).length)) : PASTE_COLUMNS
+  const least = isNamed || site.isCompact ? Math.max(...shown.map(id => label(id).length)) : PASTE_COLUMNS
   const width = (n: number) => n * least + PASTE_GAP * (n - 1) + (n < shown.length ? PASTE_GAP + more(shown.length - n).length : 0)
   let count = shown.length
   while (count > 1 && width(count) > site.maxColumns) count--
@@ -1044,7 +1011,7 @@ function pastedRow ($: Engine, site: Site, all: Record<string, Picture>, ids: nu
       {shown.slice(0, count).map(id => (
         <Box key={`pasted-${id}`} flexDirection="column" flexShrink={0}>
           {pictureOf($, share, all, pasteKey(id), label(id), 'pasted')}
-          {isNamed && <Text dimColor wrap="truncate-end">{label(id)}</Text>}
+          {isNamed && !site.isCompact && <Text dimColor wrap="truncate-end">{label(id)}</Text>}
         </Box>
       ))}
       {rest > 0 && <Text dimColor>{more(rest)}</Text>}
@@ -1232,6 +1199,7 @@ export const register: Register = (on, options) => {
   maxRows = optionRows
   animate = options.animate !== false
   clickOpens = options.click === true
+  compact = options.compact === true
   const markdown = options.markdown !== false
 
   on('session.start', async ($, e, next) => {
@@ -1256,7 +1224,6 @@ export const register: Register = (on, options) => {
     reset()
     await follow($)
     await update($, pictures, () => ({}))
-    await update($, hovered, () => null)
     void sweepOld($)
     touchTimer?.cancel()
     touchTimer = $.clock.every(TOUCH_MS, () => void touchCache($))
@@ -1267,9 +1234,10 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'images', description: 'Inline Images: turn the pictures on or off, or set their size', argumentHint: 'on | off | small | medium | large', immediate: true })
     // The window's program, started now so the first picture under the pointer opens at once: in
     // the fullscreen interface alone, the one with a pointer (elsewhere, at the first hover there is
-    // ever one; iTerm2's once its first drawing says it draws cells).
+    // ever one; iTerm2's once its first drawing says it draws cells), where the terminal draws cells
+    // or the compact view's chips open their pictures in it.
     const tui = await $.settings.read().then(settings => settings.tui, () => undefined)
-    if (isWindowing() && !isItermPending && tui === 'fullscreen') void startHost($).catch(() => undefined)
+    if (((isWindowing() && !isItermPending) || (compact && canWindow)) && tui === 'fullscreen') void startHost($).catch(() => undefined)
     return result
   })
 
@@ -1286,8 +1254,6 @@ export const register: Register = (on, options) => {
     const next: View = size ? { isOn: true, size } : { ...now, isOn: word === '' ? !now.isOn : word === 'on' }
     await update($, view, () => next)
     apply($, next)
-    // Off, the chips go with no 'leave' from under a resting pointer: their card goes too.
-    if (!next.isOn) await update($, hovered, () => null)
     $.ui.invalidate('ui.render')
     return { text: describe(next) }
   })
@@ -1302,7 +1268,6 @@ export const register: Register = (on, options) => {
     reset()
     await sweepEnded($, e.sessionId)
     await update($, pictures, () => ({}))
-    await update($, hovered, () => null)
     // The next session starts as any does: pictures on, at medium.
     await update($, view, () => START_VIEW)
     apply($, START_VIEW)
@@ -1347,7 +1312,6 @@ export const register: Register = (on, options) => {
 
   // The row of a Read call names the file it read: its picture is read from there, at full size.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
-    noteRow(e.requestId)
     if (e.props.tool === 'Read') {
       const path = filePathOf(e.props.input)
       if (path) readPaths.set(e.props.tool_use_id, path)
@@ -1357,7 +1321,6 @@ export const register: Register = (on, options) => {
 
   // A Read of a picture: the picture under its `⎿ Read image` line.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    noteRow(e.requestId)
     settle(e)
     if (!isOn) return next(e)
     if (e.surface !== 'terminal' || e.props.tool !== 'Read' || e.props.isErrored || !isReadImage(e.props.output)) return next(e)
@@ -1370,7 +1333,6 @@ export const register: Register = (on, options) => {
 
   // A run of reads folded into one line: each picture read, named, under the line.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
-    noteRow(e.requestId)
     settle(e)
     if (!isOn) return next(e)
     // Folded, the group is one count line; unfolded (--verbose, the ctrl+o transcript outside
@@ -1389,7 +1351,8 @@ export const register: Register = (on, options) => {
       if (path) readPaths.set(id, path)
       const key = loadRead($, id, output)
       const label = path ? baseName(path) : 'image'
-      if (reads.length > 1 || e.props.isExpanded) drawn.push(<Text key={`label:${id}`} dimColor>{label}</Text>)
+      // A chip names its picture itself.
+      if ((reads.length > 1 || e.props.isExpanded) && !site.isCompact) drawn.push(<Text key={`label:${id}`} dimColor>{label}</Text>)
       drawn.push(pictureOf($, site, all, key, label))
     }
     return withPictures(site.ui, await next(e), RESULT_INDENT, drawn)
@@ -1397,7 +1360,6 @@ export const register: Register = (on, options) => {
 
   // A prompt you sent with pictures pasted in: the pictures under it, side by side.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    noteRow(e.requestId)
     settle(e)
     if (!isOn) return next(e)
     if (e.surface !== 'terminal' || e.props.origin.kind !== 'composer') return next(e)
@@ -1415,7 +1377,6 @@ export const register: Register = (on, options) => {
   // only names; the pointer on a chip opens that picture in a card over the rows above, a click opens
   // it in the system's viewer. Elsewhere (no pointer) the engine draws it, the embedded pictures under it.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
-    noteRow(e.requestId)
     settle(e)
     if (!isOn) return next(e)
     if (!markdown) return next(e)
@@ -1468,75 +1429,78 @@ export const register: Register = (on, options) => {
     const home = await $.env.get('HOME')
     const site = siteOf($, e, MESSAGE_INDENT)
     const all = await read($, pictures)
-    const { Box, Client, Markdown, Text } = site.ui
+    const { Box, Markdown, Text } = site.ui
+    const isThere = (file: string) => {
+      const picture = all[`file:${file}`]
+      return !(picture && 'error' in picture && picture.error === 'not found')
+    }
 
-    /** The embedded pictures of a text, drawn: none for a link to a file that is not there. */
-    /** The pictures a text embeds, drawn (none for a link to a file that is not there), and the targets drawn. */
-    const embeddedOf = (part: string, place: Site, slot = 'image') => {
+    /** The pictures of files, drawn: none for a file that is not there. */
+    const drawnOf = (files: string[], place: Site, slot: string) => {
       const drawn: RenderElement[] = []
-      const targets = new Set<string>()
-      const seen = new Set<string>()
-      for (const target of embeddedIn(part)) {
-        const file = absolute(target, cwd, home)
-        if (!file) continue
+      for (const file of files) {
         const key = `file:${file}`
         void load($, key, async () => [{ file }])
         // Not there yet, it is not drawn, but its file is still looked at again now and then.
         void recheck($, key).catch(() => undefined)
-        const picture = all[key]
-        if (picture && 'error' in picture && picture.error === 'not found') continue
-        targets.add(target)
-        if (seen.has(file)) continue
-        seen.add(file)
-        drawn.push(pictureOf($, place, all, key, baseName(file), slot))
+        if (isThere(file)) drawn.push(pictureOf($, place, all, key, baseName(file), slot))
       }
-      return { drawn, targets }
+      return drawn
     }
 
-    // Chips need the pointer, which the terminal reports in fullscreen alone.
+    // Off fullscreen the engine draws the answer, every picture it embeds or names under it.
     if (e.viewport?.isFullscreen === false) {
-      const { drawn } = embeddedOf(text, site)
+      const embedded = embeddedIn(text).flatMap(target => absolute(target, cwd, home) ?? [])
+      const drawn = drawnOf([...new Set([...embedded, ...(await namedIn($, `${e.requestId}#all`, text, cwd))])], site, 'image')
       return drawn.length === 0 ? next(e) : withPictures(site.ui, await next(e), MESSAGE_INDENT, drawn)
     }
 
     const blocks = blocksOf(text)
     // The answer's link definitions (`[1]: https://…`), outside a fence.
     const definitions = blocks.filter(block => !/^\s*(`{3,}|~{3,})/.test(block.text)).flatMap(block => block.text.split('\n').filter(line => /^ {0,3}\[[^\]]+\]:\s*\S/.test(line))).join('\n')
+    // Each block's pictures: those it embeds, every time, and those it names, the first time the answer does.
+    const embedded: string[][] = []
     const named: string[][] = []
+    const seen = new Set<string>()
     for (const [i, block] of blocks.entries()) {
-      const embedded = embeddedIn(block.text).flatMap(target => absolute(target, cwd, home) ?? [])
-      named.push((await namedIn($, `${e.requestId}#${i}`, block.text, cwd)).filter(file => !embedded.includes(file)))
+      const own = [...new Set(embeddedIn(block.text).flatMap(target => absolute(target, cwd, home) ?? []))]
+      embedded.push(own)
+      named.push((await namedIn($, `${e.requestId}#${i}`, block.text, cwd)).filter(file => !own.includes(file) && !seen.has(file)))
+      for (const file of [...own, ...named[i]!]) seen.add(file)
     }
-    const hasEmbedded = embeddedIn(text).length > 0
-    const hasChips = named.some(files => files.length > 0)
-    if (!hasEmbedded && !hasChips) return next(e)
-    for (const file of named.flat().slice(0, PREFETCH_CHIPS)) void prefetch($, file)
+    if (seen.size === 0) return next(e)
 
-    const now = await read($, hovered)
-    const onScreen = e.props.onScreen
-    if (now?.requestId === e.requestId) {
-      const where = JSON.stringify(onScreen ?? null)
-      // The answer moved under a resting pointer: the chip is no longer under it.
-      if (hoveredAt !== undefined && hoveredAt !== where) void update($, hovered, () => null).catch(() => undefined)
-      else hoveredAt = where
+    // In the compact view each picture is a chip beside its block, once an answer, numbered in order
+    // (one the window cannot show keeps its number, drawn under the block instead).
+    const chipped = new Set<string>()
+    const chipsOf = (i: number) => {
+      if (!site.isCompact) return []
+      // An embedded picture is looked for at once: one not there gets no chip.
+      for (const file of embedded[i]!) {
+        void load($, `file:${file}`, async () => [{ file }])
+        void recheck($, `file:${file}`).catch(() => undefined)
+      }
+      const files = [...embedded[i]!, ...named[i]!].filter(file => !chipped.has(file) && isThere(file))
+      for (const file of files) chipped.add(file)
+      return files
     }
-    const isHosting = now?.requestId === e.requestId && hoveredAt === JSON.stringify(onScreen ?? null)
-    const chipWidth = Math.max(0, ...named.flat().map(file => baseName(file).length))
+    const blockChips = blocks.map((_, i) => chipsOf(i))
+    const isChip = (file: string) => !noWindow.has(`file:${file}`)
+    for (const file of blockChips.flat().filter(isChip).slice(0, PREFETCH_CHIPS)) void prefetch($, file)
+    const chipWidth = Math.max(0, ...blockChips.flat().filter(isChip).map(file => baseName(file).length))
     const bodyColumns = Math.max(16, site.maxColumns - (chipWidth > 0 ? chipWidth + 2 : 0))
     const place = { ...site, maxColumns: bodyColumns }
     let index = 0
-    let open: { file: string; block: number } | undefined
     const rows = blocks.map((block, i) => {
-      const chips = named[i]!.map(file => {
-        const chip = `ref:${index++}`
-        chipFiles.set(`${e.requestId}/${chip}`, file)
-        if (isHosting && chip === now!.element) open = { file, block: i }
-        return { chip, file }
-      })
+      const chips = blockChips[i]!.map(file => ({ chip: `ref:${index++}`, file })).filter(({ file }) => isChip(file))
       // Each block's pictures have keys of their own: one picture embedded twice is two Images.
-      const { drawn: pictures, targets } = embeddedOf(block.text, place, `image-${i}`)
-      // A picture drawn under the block is not written in it too, as its alt and path.
-      const isDrawn = new Set(embeddedAt(block.text).filter(({ target }) => targets.has(target)).map(({ at }) => at))
+      const pictures = drawnOf([...embedded[i]!, ...named[i]!].filter(file => !chips.some(chip => chip.file === file)), place, `image-${i}`)
+      // A picture drawn under the block (or a chip beside it) is not written in it too, as its alt
+      // and path.
+      const isDrawn = new Set(embeddedAt(block.text).filter(({ target }) => {
+        const file = absolute(target, cwd, home)
+        return file !== undefined && isThere(file)
+      }).map(({ at }) => at))
       // Trimmed of blank lines, not of the indent that makes a code block one; with every link
       // definition of the answer, so a reference link reads in any block.
       const body = block.text.replace(MARKDOWN_IMAGE, (match: string, alt: string, target: string, at: number) => (isDrawn.has(at) ? '' : match)).replace(/^(\s*\n)+|\s+$/g, '')
@@ -1551,84 +1515,35 @@ export const register: Register = (on, options) => {
               </Box>
               {chips.length > 0 && (
                 <Box flexDirection="column" flexShrink={0}>
-                  {chips.map(({ chip, file }) => <Client key={chip} module="./chip.tsx" props={{ label: baseName(file) }} />)}
+                  {chips.map(({ chip, file }) => chipOf(site, `file:${file}`, baseName(file), chip, file))}
                 </Box>
               )}
             </Box>
           )}
           {pictures}
-          {hasChips && (
-            <Box position="absolute" top={0} left={0} width={1} height="100%">
-              <Client key={`probe:${i}`} module="./probe.tsx" width={1} height="100%" />
-            </Box>
-          )}
         </Box>
       )
     })
-    // The card of the chip the pointer is on, drawn last so no block paints over it: over the rows
-    // above its block where they hold it, else over those below, else over the most there are.
-    let card: RenderElement | undefined
-    const heights = blockRows.get(e.requestId) ?? []
-    // Each block up to the chip's must have said its height (a probe that has not is a hole).
-    const measured = open && Array.from({ length: open.block + 1 }, (_, i) => heights[i]).every(rows => typeof rows === 'number' && rows > 0)
-    if (open && measured) {
-      let top = 0
-      for (let i = 0; i <= open.block; i++) {
-        top += blocks[i]!.gap ? 1 : 0
-        if (i < open.block) top += heights[i]!
-      }
-      const bottom = top + heights[open.block]!
-      const first = onScreen?.first ?? 0
-      const last = onScreen?.last ?? onScreen?.of ?? bottom
-      const viewportRows = e.viewport?.rows ?? 40
-      // Above the answer on screen: the rows the screen holds over it, known only for the newest row,
-      // the one at the foot of the screen, whose top shows; any other may have rows under it.
-      const outside = first === 0 && isNewest(e.requestId) ? Math.max(0, viewportRows - BOTTOM_ROWS - (last - first + 1)) : 0
-      const aboveIn = top - first
-      const below = last - bottom + 1
-      const caption = open.file.startsWith(`${cwd}/`) ? open.file.slice(cwd.length + 1) : open.file
-      const cardSite = (rows: number) => ({ ...site, maxColumns: Math.max(8, site.maxColumns - 2), maxRows: Math.max(1, rows - CARD_ROWS) })
-      const key = `file:${open.file}`
-      const wanted = cardOf($, cardSite(HOVER_ROWS + CARD_ROWS), all, key, caption)[1]
-      const [space, isAbove] = aboveIn >= wanted ? [aboveIn, true]
-        : below >= wanted ? [below, false]
-        : aboveIn + outside >= wanted ? [aboveIn + outside, true]
-        : aboveIn + outside >= below ? [aboveIn + outside, true] : [below, false]
-      if (space >= MIN_CARD_ROWS) {
-        const [drawn, height] = cardOf($, cardSite(Math.min(space, HOVER_ROWS + CARD_ROWS)), all, key, caption)
-        card = <Box key="card" position="absolute" top={isAbove ? top - height : bottom} left={0}>{drawn}</Box>
-      }
-    }
     // The reply's first block opens with the engine's bullet; the text stands two columns in.
     return (
       <Box flexDirection="row">
         <Text>{e.props.isFirstOfReply ? '● ' : '  '}</Text>
         <Box flexDirection="column" flexGrow={1} flexShrink={1}>
           {rows}
-          {card}
         </Box>
       </Box>
     )
   })
 
-  // A probe says how many rows its block was laid out in: where a card floats over an answer. A chip
-  // says when the pointer comes onto it and when it leaves: its card opens and closes, the picture
-  // read as it first opens. Clicked, the picture opens in the system's viewer.
+  // A chip says when the pointer comes onto it and when it leaves, and so does the region over a
+  // picture drawn: its window opens and closes. Clicked, where clicks open, the picture opens in the
+  // system's viewer.
   on('ui.message', async ($, e, next) => {
     const result = await next(e)
-    const rows = (e.data as { rows?: unknown } | null)?.rows
-    if (/^probe:\d+$/.test(e.element) && typeof rows === 'number') {
-      const heights = blockRows.get(e.requestId) ?? []
-      heights[Number(e.element.slice('probe:'.length))] = rows
-      blockRows.set(e.requestId, heights)
-      // A card open over this answer moves with the blocks; with none open, nothing draws again.
-      if ((await read($, hovered))?.requestId === e.requestId) await update($, hovered, now => (now ? { ...now } : now))
-      return result
-    }
+    const data = e.data as { isOver?: unknown; isClicked?: unknown } | null
     // A click on a picture drawn: it opens in the system's viewer.
     const opened = /^open:/.test(e.element) ? openers.get(`${e.requestId}/${e.element}`) : undefined
     if (opened !== undefined) {
-      const data = e.data as { isOver?: unknown; isClicked?: unknown } | null
       const file = sourceFiles.get(opened)
       if (data?.isClicked === true && clickOpens) {
         pointAt($, opened, false)
@@ -1636,28 +1551,15 @@ export const register: Register = (on, options) => {
       } else if (isWindowing()) pointAt($, opened, data?.isOver === true)
       return result
     }
-    const path = /^ref:\d+$/.test(e.element) ? chipFiles.get(`${e.requestId}/${e.element}`) : undefined
-    if (!path) return result
-    const data = e.data as { isOver?: unknown; isClicked?: unknown } | null
-    const isThis = (now: Hovered | null) => now?.requestId === e.requestId && now.element === e.element
+    const chip = /^ref:/.test(e.element) ? chips.get(`${e.requestId}/${e.element}`) : undefined
+    if (!chip) return result
     if (data?.isClicked === true && clickOpens) {
-      pointAt($, `file:${path}`, false)
-      void openFile($, path)
-      await update($, hovered, () => null)
+      pointAt($, chip.key, false)
+      const file = chip.file ?? sourceFiles.get(chip.key)
+      if (file) void openFile($, file)
       return result
     }
-    // Where the terminal draws cells, the chip's picture opens in a window, not a card of cells.
-    if (isWindowing() && !noWindow.has(`file:${path}`)) {
-      pointAt($, `file:${path}`, data?.isOver === true, path)
-      return result
-    }
-    if (data?.isOver === true) {
-      void load($, `file:${path}`, async () => [{ file: path }])
-      if (!isThis(await read($, hovered))) {
-        hoveredAt = undefined
-        await update($, hovered, () => ({ requestId: e.requestId, element: e.element, path }))
-      }
-    } else await update($, hovered, now => (isThis(now) ? null : now))
+    pointAt($, chip.key, data?.isOver === true, chip.file)
     return result
   })
 }
