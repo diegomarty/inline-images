@@ -403,7 +403,11 @@ $timer.add_Tick({
     try { Say '.' } catch { [System.Windows.Forms.Application]::ExitThread(); return }
     if ($state.waiting) { $spinner.Text = [string]$turns[[Math]::Floor($state.beat / 3) % $turns.Count] }
   }
-  try { $lines = [System.IO.File]::ReadAllText($commands) -split [char]10 } catch { return }
+  # Read letting the session write meanwhile: ReadAllText locks the file, and a write then fails.
+  try {
+    $stream = [System.IO.File]::Open($commands, 'Open', 'Read', 'ReadWrite, Delete')
+    try { $lines = (New-Object System.IO.StreamReader($stream)).ReadToEnd() -split [char]10 } finally { $stream.Close() }
+  } catch { return }
   $number = 0
   if ($lines.Count -lt 6 -or $lines[5] -ne 'end' -or -not [int]::TryParse($lines[0], [ref]$number) -or $number -le $state.last) { return }
   $state.last = $number

@@ -60,6 +60,9 @@ const SVG_SIDE = 1200
 // the session), is started again so many times at most.
 const WINDOW_SIZE = 800
 const WINDOW_STARTS = 3
+// A command its file would not take is written again so many times, this far apart.
+const WRITE_TRIES = 3
+const WRITE_RETRY_MS = 20
 // The program starts as the first picture the pointer can open is drawn, and ends once it has gone
 // this long with no picture shown in it (looked at this often), to start again at the next hover.
 const WINDOW_IDLE_MS = 5 * 60 * 1000
@@ -440,7 +443,16 @@ async function send ($: Engine, running: Host, text: string) {
     while (running.next !== undefined) {
       const next = running.next
       running.next = undefined
-      await $.fs.write(running.commands, next)
+      // A write that fails (the file read at that moment, on Windows) is tried again a little later.
+      for (let tries = 1; ; tries++) {
+        try {
+          await $.fs.write(running.commands, next)
+          break
+        } catch (error) {
+          if (tries >= WRITE_TRIES) throw error
+          await $.clock.sleep(WRITE_RETRY_MS)
+        }
+      }
     }
   } finally {
     running.isWriting = false

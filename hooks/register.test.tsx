@@ -77,7 +77,7 @@ const padded = (base64: string, size: number) => {
  * processes it runs (head, dd, base64, sips, git) and what the engine draws. Like the engine's,
  * `fs.read` rejects a file of 4 MiB or more, and `fs.stat` one that is not there.
  */
-function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' | 'unreadable' | 'crash', startMs = 0, tui = 'fullscreen' as string | null, refusals = 0, beatMs = 40 } = {}) {
+function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' | 'unreadable' | 'crash', startMs = 0, tui = 'fullscreen' as string | null, refusals = 0, beatMs = 40, busyWrites = 0 } = {}) {
   const clock = mock.clock(on, { now })
   const asked = { sessionId: 0, promptReads: 0 }
   mock.env(on, env)
@@ -205,9 +205,11 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   on('settings.read', ($, e) => {
     return ({ value: tui === null ? {} : { tui } }) as never
   })
-  // What the mod writes, by path.
+  // What the mod writes, by path. The first `busyWrites` to a window's commands file fail, as one
+  // Windows has open for reading.
   const written: Record<string, string> = {}
   on('fs.write', ($, e) => {
+    if (/\/window-[0-9a-z]+\.txt$/.test(e.path) && e.text !== '' && busyWrites-- > 0) throw new Error('EBUSY: resource busy or locked')
     written[local(e.path)] = e.text
     return { value: undefined }
   })
@@ -1066,6 +1068,17 @@ test('in a terminal that draws cells, a picture under the pointer opens in the w
   await w.clock.advance(50)
   expect(shown(w)).toEqual(['/project/app/shot.png', '/project/app/shot.png'])
   expect(w.windows).toHaveLength(1)
+})
+
+test('a command the window\'s file would not take is written again: the picture still shows', async ($, on) => {
+  const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG }, busyWrites: 2 })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  await w.clock.advance(10)
+  await pointPicture(row)
+  await w.clock.advance(100)
+  expect(shown(w)).toEqual(['/project/app/shot.png'])
 })
 
 test('going from one picture straight to the next shows the next: the leave of the first does not hide it', COMPACT, async ($, on) => {
