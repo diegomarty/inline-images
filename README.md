@@ -102,6 +102,10 @@ It answers with how pictures are drawn now. A reload of the mod keeps what it se
 /plugin install inline-images@inline-images
 ```
 
+It needs Claude Code 2.1.308 or later with mods on. Mods are in early access: Claude Code turns installed ones on account by account, and an organization can turn them off. Where they are off, the mod installs but draws nothing, and Claude Code says that the mods you installed aren't running in this session.
+
+Installing says some options are not set yet: each has its default (see [Options](#options)), so there is nothing to set unless you want another.
+
 ### Updates
 
 Claude Code does not update a marketplace like this one on its own unless told to. When a newer version is out, the mod says so in a toast (the **Check for updates** option; nothing is asked with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set). To update, run `/plugin`, then **Marketplaces** → **inline-images** → **Update**, and restart Claude Code. To have it update itself at start-up, turn on auto-update for the marketplace there.
