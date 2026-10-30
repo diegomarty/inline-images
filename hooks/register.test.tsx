@@ -77,7 +77,7 @@ const padded = (base64: string, size: number) => {
  * processes it runs (head, dd, base64, sips, git) and what the engine draws. Like the engine's,
  * `fs.read` rejects a file of 4 MiB or more, and `fs.stat` one that is not there.
  */
-function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' | 'unreadable' | 'crash', startMs = 0, tui = 'fullscreen' as string | null, refusals = 0 } = {}) {
+function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' | 'unreadable' | 'crash', startMs = 0, tui = 'fullscreen' as string | null, refusals = 0, beatMs = 40 } = {}) {
   const clock = mock.clock(on, { now })
   const asked = { sessionId: 0, promptReads: 0 }
   mock.env(on, env)
@@ -213,7 +213,8 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
   })
   // The window's program (window.ts), one a session: it says `.`, then `ready` (`startMs` on), and
   // reads its commands every 40 ms, doing the latest; a picture it shows it says `shown <n>` of, one
-  // it cannot read `error <n>: …`. Or it cannot run at all, for want of a display.
+  // it cannot read `error <n>: …` (every `beatMs`, 40 ms as the real one). Or it cannot run at all,
+  // for want of a display.
   const windows: { argv: string[]; env: Record<string, string>; isEnded: boolean }[] = []
   const shows: { verb: string; path: string; width: number; height: number }[] = []
   on('process.spawn', async function * ($, e) {
@@ -240,7 +241,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
           shows.push({ verb, path, width: Number(width), height: Number(height) })
           if (verb === 'show' && path) yield { stream: 'stdout' as const, text: window === 'unreadable' ? `error ${number}: cannot read the image\n` : `shown ${number}\n` }
         }
-        await clock.sleep(40)
+        await clock.sleep(beatMs)
         yield { stream: 'stdout' as const, text: '.\n' }
       }
     } finally {
@@ -1046,11 +1047,14 @@ test('in a terminal that draws cells, a picture under the pointer opens in the w
   const w = world(on, { env: CELLS, files: { '/project/app/shot.png': PNG } })
   await startSession($)
   await w.clock.advance(10)
-  // The window's program starts with the session, before any picture is pointed at: one for it.
-  expect(w.windows).toHaveLength(1)
-  expect(w.windows[0]).toMatchObject({ argv: ['osascript', '-l', 'JavaScript', '-e', expect.stringContaining('NSPanel')], env: { INLINE_IMAGES_COMMANDS: expect.stringMatching(/\/window-[0-9a-z]+\.txt$/), INLINE_IMAGES_SIZE: '800' } })
+  // No picture yet: no program.
+  expect(w.windows).toHaveLength(0)
   await readRow($, 'tu-1', '/project/app/shot.png')
   const row = await resultRow($, 'tu-1', image(PNG))
+  await w.clock.advance(10)
+  // The window's program starts as the first picture is drawn, before it is pointed at: one for it.
+  expect(w.windows).toHaveLength(1)
+  expect(w.windows[0]).toMatchObject({ argv: ['osascript', '-l', 'JavaScript', '-e', expect.stringContaining('NSPanel')], env: { INLINE_IMAGES_COMMANDS: expect.stringMatching(/\/window-[0-9a-z]+\.txt$/), INLINE_IMAGES_SIZE: '800' } })
   await pointPicture(row)
   await w.clock.advance(50)
   // Its size goes with it: the window opens that large at once, a spinner in it till the picture is read.
@@ -1085,17 +1089,42 @@ test('off the fullscreen interface the window\'s program waits for a pointer: no
 test('the session ending ends the window\'s program', async ($, on) => {
   const w = world(on, { env: CELLS })
   await startSession($)
+  await resultRow($, 'tu-1', image(PNG))
   await w.clock.advance(10)
   await $.session.end({ reason: 'prompt_input_exit', sessionId: 's-1', resume: { id: 's-1' } })
   await w.clock.advance(100)
   expect(w.windows[0]!.isEnded).toBe(true)
 })
 
-test('in the compact view the window\'s program starts with the session, in a terminal that draws pictures too', COMPACT, async ($, on) => {
-  const w = world(on)
+test('a session with no picture starts no window\'s program; one starts with the first picture drawn, in any terminal', async ($, on) => {
+  const w = world(on, { files: { '/project/app/shot.png': PNG } })
   await startSession($)
+  await answer($, 'No pictures here.', 'a-1')
+  await w.clock.advance(10)
+  expect(w.windows).toHaveLength(0)
+  await answer($, 'Saved as shot.png.', 'a-2')
+  await w.clock.advance(10)
+  await answer($, 'Saved as shot.png.', 'a-3')
   await w.clock.advance(10)
   expect(w.windows).toHaveLength(1)
+})
+
+test('an idle window\'s program ends, and the next hover starts it again', async ($, on) => {
+  // A program that reads its commands every ten seconds, so minutes pass in few steps.
+  const w = world(on, { files: { '/project/app/shot.png': PNG }, beatMs: 10_000 })
+  await startSession($)
+  await readRow($, 'tu-1', '/project/app/shot.png')
+  const row = await resultRow($, 'tu-1', image(PNG))
+  await w.clock.advance(10)
+  expect(w.windows).toHaveLength(1)
+  await w.clock.advance(4 * 60 * 1000)
+  expect(w.windows[0]!.isEnded).toBe(false)
+  await w.clock.advance(2 * 60 * 1000)
+  expect(w.windows[0]!.isEnded).toBe(true)
+  await pointPicture(row)
+  await w.clock.advance(20_000)
+  expect(w.windows).toHaveLength(2)
+  expect(shown(w)).toEqual(['/project/app/shot.png'])
 })
 
 test('a window that cannot show sends the pictures back to the terminal: the compact view draws them', COMPACT, async ($, on) => {
@@ -1385,10 +1414,12 @@ test('a hover as the session starts, before its program is up, starts one progra
 test("a session that ends tells its program to quit, in a file no later program writes to", async ($, on) => {
   const w = world(on, { env: CELLS })
   await startSession($)
+  await resultRow($, 'tu-1', image(PNG))
   await w.clock.advance(10)
   const first = w.windows[0]!.env.INLINE_IMAGES_COMMANDS!
   await $.session.end({ reason: 'prompt_input_exit', sessionId: 's-1', resume: { id: 's-1' } })
   await startSession($)
+  await resultRow($, 'tu-2', image(PNG))
   await w.clock.advance(100)
   expect(w.written[first]).toMatch(/\nquit\n/)
   expect(w.windows.at(-1)!.env.INLINE_IMAGES_COMMANDS).not.toBe(first)

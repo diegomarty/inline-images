@@ -60,6 +60,10 @@ const SVG_SIDE = 1200
 // the session), is started again so many times at most.
 const WINDOW_SIZE = 800
 const WINDOW_STARTS = 3
+// The program starts as the first picture the pointer can open is drawn, and ends once it has gone
+// this long with no picture shown in it (looked at this often), to start again at the next hover.
+const WINDOW_IDLE_MS = 5 * 60 * 1000
+const IDLE_CHECK_MS = 60 * 1000
 // A PNG drawn in cells past this many pixels is shrunk by a converter where there is one, quicker
 // than decoding it here.
 const DECODE_PIXELS = 1_000_000
@@ -120,6 +124,11 @@ type Host = {
 let host: Host | undefined
 let hostStarting: Promise<Host | undefined> | undefined
 let hostStarts = 0
+// When a picture was last pointed at (or the program started), whether it was started ahead of the
+// first hover this session, and the timer that ends it when idle.
+let usedAt = 0
+let isWarmed = false
+let idleTimer: Timer | undefined
 // The picture the window is for (up, or on its way), and the one under the pointer.
 let windowKey: string | undefined
 let pointerOn: string | undefined
@@ -288,6 +297,7 @@ function reset () {
   openers.clear()
   drawnAt.clear()
   noWindow.clear()
+  isWarmed = false
   frameDirs.clear()
   dropped.length = 0
   index = undefined
@@ -332,6 +342,20 @@ function settle (e: { surface: string; viewport?: { isFullscreen?: boolean } }) 
  * while to (PowerShell's above all). It shows one picture at a time, told in a file. Asked again
  * while it starts, the same start answers.
  */
+/** Starts the window's program ahead of the first hover, once a session: where a picture the pointer can open is drawn. */
+function warm ($: Engine) {
+  if (isWarmed || !canWindow) return
+  isWarmed = true
+  void startHost($).catch(() => undefined)
+}
+
+/** Ends the window's program once idle: no window open, and none for WINDOW_IDLE_MS. The next hover starts it again. */
+async function stopIdle ($: Engine) {
+  if (!host || hostStarting || windowKey !== undefined) return
+  if ((await $.clock.now()) - usedAt < WINDOW_IDLE_MS) return
+  await stopHost($)
+}
+
 function startHost ($: Engine) {
   if (host) return Promise.resolve(host)
   return (hostStarting ??= launchHost($).finally(() => {
@@ -349,6 +373,7 @@ async function launchHost ($: Engine) {
     return undefined
   }
   hostStarts++
+  usedAt = await $.clock.now()
   const mine = epoch
   // A file of its own: a program a reload left behind, still reading the last one, is told nothing.
   const commands = `${await cacheFolder($)}/window-${Date.now().toString(36)}.txt`
@@ -493,6 +518,9 @@ async function stopHost ($: Engine) {
 
 /** The pointer onto (or off) a picture or a chip (`file`, a chip's): its window opens, or closes. */
 function pointAt ($: Engine, key: string, isOver: boolean, file?: string) {
+  void $.clock.now().then(now => {
+    usedAt = now
+  })
   if (isOver) {
     pointerOn = key
     void openWindow($, key, file).catch(() => undefined)
@@ -948,6 +976,7 @@ function siteOf ($: Engine, e: RenderOf<'ToolResult' | 'ToolGroup' | 'UserMessag
  */
 function pictureOf ($: Engine, site: Site, all: Record<string, Picture>, key: string, label: string, slot = 'image'): RenderElement {
   const { ui: { Box, Client, Image, Raster, Text }, requestId } = site
+  if (site.canPoint && canWindow) warm($)
   if (site.isCompact && !noWindow.has(key)) return chipOf(site, key, label, `ref:${slot}:${nameOf(key)}`)
   const picture = all[key]
   const frames = loaded.get(key)
@@ -1234,11 +1263,10 @@ export const register: Register = (on, options) => {
     // The draft as it stands; edits and every other change of the box follow from here.
     await track($, (await $.prompt.read()).text)
     await $.command.register({ name: 'images', description: 'Inline Images: turn the pictures on or off, or set their size', argumentHint: 'on | off | small | medium | large', immediate: true })
-    // The window's program, started now so the first picture under the pointer opens at once: in
-    // the fullscreen interface alone, the one with a pointer (elsewhere, at the first hover there is
-    // ever one).
-    const tui = await $.settings.read().then(settings => settings.tui, () => undefined)
-    if (canWindow && tui === 'fullscreen') void startHost($).catch(() => undefined)
+    // The window's program starts as the first picture it can open is drawn (a session with none
+    // runs none), and ends when idle.
+    idleTimer?.cancel()
+    idleTimer = $.clock.every(IDLE_CHECK_MS, () => void stopIdle($).catch(() => undefined))
     return result
   })
 
@@ -1486,6 +1514,7 @@ export const register: Register = (on, options) => {
       return files
     }
     const blockChips = blocks.map((_, i) => chipsOf(i))
+    if (blockChips.some(files => files.length > 0)) warm($)
     const isChip = (file: string) => !noWindow.has(`file:${file}`)
     for (const file of blockChips.flat().filter(isChip).slice(0, PREFETCH_CHIPS)) void prefetch($, file)
     const chipWidth = Math.max(0, ...blockChips.flat().filter(isChip).map(file => baseName(file).length))
