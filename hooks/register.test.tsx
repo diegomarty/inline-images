@@ -5,6 +5,7 @@ import type { On } from 'claude-code'
 
 import { Budget } from './budget'
 import { countFrames, decodeGif, shrink } from './gif'
+import { inflate } from './inflate'
 import { decodePng } from './png'
 
 // A PNG of one red pixel.
@@ -977,17 +978,73 @@ test("a paste looked for again and again looks through every project's folder on
 
 // --- PNG without a converter, and the systems: Windows with PowerShell, WSL with Windows' viewer.
 
+function pngChunk (type: string, body: number[] | Uint8Array) {
+  const length = [24, 16, 8, 0].map(shift => (body.length >>> shift) & 0xff)
+  return [...length, ...Array.from(type, c => c.charCodeAt(0)), ...body, 0, 0, 0, 0]
+}
+
+function pngWith (width: number, height: number, colour: number, depth: number, idat: number[] | Uint8Array, extra: [string, number[]][] = []) {
+  const header = [...[24, 16, 8, 0].map(s => (width >>> s) & 0xff), ...[24, 16, 8, 0].map(s => (height >>> s) & 0xff), depth, colour, 0, 0, 0]
+  return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...pngChunk('IHDR', header), ...extra.flatMap(([type, body]) => pngChunk(type, body)), ...pngChunk('IDAT', idat), ...pngChunk('IEND', [])])
+}
+
 /** A PNG with stored (uncompressed) deflate blocks, written by hand: colour type, depth, and rows of raw samples. */
 function pngOf (width: number, height: number, colour: number, depth: number, rows: number[][], extra: [string, number[]][] = []) {
-  const chunk = (type: string, body: number[]) => {
-    const length = [24, 16, 8, 0].map(shift => (body.length >>> shift) & 0xff)
-    return [...length, ...Array.from(type, c => c.charCodeAt(0)), ...body, 0, 0, 0, 0]
-  }
   const raw = rows.flatMap(row => [0, ...row])
   const stored = [0x78, 0x01, 1, raw.length & 0xff, raw.length >> 8, ~raw.length & 0xff, (~raw.length >> 8) & 0xff, ...raw, 0, 0, 0, 0]
-  const header = [...[24, 16, 8, 0].map(s => (width >>> s) & 0xff), ...[24, 16, 8, 0].map(s => (height >>> s) & 0xff), depth, colour, 0, 0, 0]
-  return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...chunk('IHDR', header), ...extra.flatMap(([type, body]) => chunk(type, body)), ...chunk('IDAT', stored), ...chunk('IEND', [])])
+  return pngWith(width, height, colour, depth, stored, extra)
 }
+
+function deflateOf (literals: number[], repeats: number, distance = { code: 0, extraBits: 0 }) {
+  const FINAL_BLOCK = 1
+  const FIXED_HUFFMAN = 1
+  const FIRST_LITERAL_CODE = 0x30
+  const LENGTH_258_CODE = 0xc5
+  const END_OF_BLOCK_CODE = 0
+  const bytes: number[] = []
+  let held = 0
+  let count = 0
+  const writeLowBitFirst = (value: number, bits: number) => {
+    for (let i = 0; i < bits; i++) {
+      held |= ((value >> i) & 1) << count
+      if (++count === 8) (bytes.push(held), (held = 0), (count = 0))
+    }
+  }
+  const writeHighBitFirst = (value: number, bits: number) => {
+    for (let i = bits - 1; i >= 0; i--) writeLowBitFirst((value >> i) & 1, 1)
+  }
+  writeLowBitFirst(FINAL_BLOCK, 1)
+  writeLowBitFirst(FIXED_HUFFMAN, 2)
+  for (const literal of literals) writeHighBitFirst(FIRST_LITERAL_CODE + literal, 8)
+  for (let i = 0; i < repeats; i++) {
+    writeHighBitFirst(LENGTH_258_CODE, 8)
+    writeHighBitFirst(distance.code, 5)
+    writeLowBitFirst(0, distance.extraBits)
+  }
+  writeHighBitFirst(END_OF_BLOCK_CODE, 7)
+  if (count > 0) bytes.push(held)
+  return Uint8Array.from(bytes)
+}
+
+test('inflate stops at its limit: data that unpacks to a lot is never unpacked past it', () => {
+  const BYTE = 97
+  const REPEATS = 4000
+  const MATCH_LENGTH = 258
+  const LIMIT = 1000
+  const bomb = deflateOf([BYTE], REPEATS)
+  expect(inflate(bomb).length).toBe(1 + MATCH_LENGTH * REPEATS)
+  const limited = inflate(bomb, 64, LIMIT)
+  expect(limited.length).toBe(LIMIT)
+  expect(limited.every(byte => byte === BYTE)).toBe(true)
+})
+
+test('a PNG unpacks no further than its rows: what follows them is never read', () => {
+  const NONE_FILTER = 0
+  const GREY = 97
+  const BEFORE_THE_START = { code: 29, extraBits: 13 }
+  const idat = [0x78, 0x01, ...deflateOf([NONE_FILTER, GREY, GREY, GREY], 1, BEFORE_THE_START), 0, 0, 0, 0]
+  expect([...decodePng(pngWith(1, 1, 2, 8, idat)).data]).toEqual([GREY, GREY, GREY, 255])
+})
 
 test('a PNG decodes to RGBA: colour, grey, a palette with see-through entries, two bits a pixel', () => {
   expect([...decodePng(pngOf(2, 1, 2, 8, [[255, 0, 0, 0, 0, 255]])).data]).toEqual([255, 0, 0, 255, 0, 0, 255, 255])
