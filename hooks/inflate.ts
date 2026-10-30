@@ -28,7 +28,7 @@ const FIXED_LITERALS = huffman(Uint8Array.from({ length: 288 }, (_, i) => (i < 1
 const FIXED_DISTANCES = huffman(new Uint8Array(30).fill(5))
 
 /** Inflates raw DEFLATE data, into a buffer grown as needed (`expected` bytes to start with). */
-export function inflate (data: Uint8Array, expected = data.length * 4): Uint8Array {
+export function inflate (data: Uint8Array, expected = data.length * 4, limit = Infinity): Uint8Array {
   let out = new Uint8Array(Math.max(1024, expected))
   let size = 0
   let at = 0
@@ -38,7 +38,7 @@ export function inflate (data: Uint8Array, expected = data.length * 4): Uint8Arr
 
   const room = (more: number) => {
     if (size + more <= out.length) return
-    const grown = new Uint8Array(Math.max(out.length * 2, size + more))
+    const grown = new Uint8Array(Math.min(Math.max(out.length * 2, size + more), Math.max(size + more, limit)))
     grown.set(out.subarray(0, size))
     out = grown
   }
@@ -79,10 +79,12 @@ export function inflate (data: Uint8Array, expected = data.length * 4): Uint8Arr
       count = 0
       const length = data[at]! | (data[at + 1]! << 8)
       at += 4
-      room(length)
-      out.set(data.subarray(at, at + length), size)
-      size += length
+      const taken = Math.min(length, limit - size)
+      room(taken)
+      out.set(data.subarray(at, at + taken), size)
+      size += taken
       at += length
+      if (size >= limit) return out.subarray(0, limit)
       continue
     }
     let literals = FIXED_LITERALS
@@ -115,6 +117,7 @@ export function inflate (data: Uint8Array, expected = data.length * 4): Uint8Arr
       if (symbol < 256) {
         room(1)
         out[size++] = symbol
+        if (size >= limit) return out.subarray(0, limit)
         continue
       }
       if (symbol === 256) break
@@ -125,13 +128,14 @@ export function inflate (data: Uint8Array, expected = data.length * 4): Uint8Arr
       if (distance > size) throw new Error('a deflate distance past the start')
       room(length)
       for (let i = 0; i < length; i++, size++) out[size] = out[size - distance]!
+      if (size >= limit) return out.subarray(0, limit)
     }
   }
   return out.subarray(0, size)
 }
 
 /** Inflates zlib data: two bytes of header, then DEFLATE (the checksum after it is not checked). */
-export function unzlib (data: Uint8Array, expected?: number) {
+export function unzlib (data: Uint8Array, expected?: number, limit?: number) {
   if (data.length < 2 || (data[0]! & 0x0f) !== 8 || ((data[0]! << 8) | data[1]!) % 31 !== 0) throw new Error('not zlib data')
-  return inflate(data.subarray(2), expected)
+  return inflate(data.subarray(2), expected, limit)
 }

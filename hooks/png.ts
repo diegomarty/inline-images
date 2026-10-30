@@ -78,7 +78,7 @@ export function decodePng (bytes: Uint8Array, maxPixels = 4096 * 4096): Pixels {
   const passes = interlace ? PASSES : [[0, 0, 1, 1] as const]
   const sizes = passes.map(([x0, y0, dx, dy]) => [Math.ceil((width - x0) / dx), Math.ceil((height - y0) / dy)] as const)
   const expected = sizes.reduce((sum, [w, h]) => sum + (w && h ? h * (1 + Math.ceil((w * bitsPerPixel) / 8)) : 0), 0)
-  const data = unzlib(packed, expected)
+  const data = unzlib(packed, expected, expected)
 
   const rgba = new Uint8Array(width * height * 4)
   const scale = depth < 8 ? 255 / ((1 << depth) - 1) : 1
