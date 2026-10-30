@@ -95,7 +95,7 @@ const DRAWN_MS = 2000
 const TOUCH_MS = 6 * 60 * 60 * 1000
 // The version this is (CI checks it is plugin.json's), and where its releases are: once a day at
 // most, a session looks for a newer one, and says so once a version.
-const VERSION = '0.6.0'
+const VERSION = '0.6.1'
 const LATEST_RELEASE = 'https://api.github.com/repos/diegomarty/inline-images/releases/latest'
 const UPDATE_CHECK_MS = 24 * 60 * 60 * 1000
 const UPDATE_TOAST_MS = 15000
