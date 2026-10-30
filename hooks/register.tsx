@@ -180,7 +180,10 @@ const blockRows = new Map<string, number[]>()
 const readPaths = new Map<string, string>()
 
 /** An animation playing: where it is drawn, which picture, and the frame on show. */
-type Playing = { requestId: string; element: string; key: string; frame: number; columns: number; rows: number; timer?: Timer }
+type Playing = { requestId: string; element: string; key: string; frame: number; columns: number; rows: number; refused: number; timer?: Timer }
+// A frame swap refused this many times in a row stops the animation: a refusal can pass (a
+// terminal not yet asked whether it reads files, a row not mounted yet), so it is tried again first.
+const MAX_REFUSALS = 20
 const playing = new Map<string, Playing>()
 
 const idsIn = (text: string) => [...new Set([...text.matchAll(TOKEN)].map(match => Number(match[1])))]
@@ -839,14 +842,19 @@ async function step ($: Engine, id: string) {
   const play = playing.get(id)
   const frames = play && loaded.get(play.key)
   if (!play || !frames) return void playing.delete(id)
-  play.frame = (play.frame + 1) % frames.delays.length
+  const frame = (play.frame + 1) % frames.delays.length
   const { requestId, element: key, columns, rows } = play
   const shown = frames.sources
-    ? await $.ui.blit({ requestId, key, source: frames.sources[play.frame]!, columns, rows }).catch(() => ({ deny: 'gone' }))
-    : await $.ui.blit({ requestId, key, cells: cellsOf(play.key, play.frame, columns, rows), columns, rows }).catch(() => ({ deny: 'gone' }))
+    ? await $.ui.blit({ requestId, key, source: frames.sources[frame]!, columns, rows }).catch(() => ({ deny: 'gone' }))
+    : await $.ui.blit({ requestId, key, cells: cellsOf(play.key, frame, columns, rows), columns, rows }).catch(() => ({ deny: 'gone' }))
   if (playing.get(id) !== play) return
-  if (shown.deny) return void playing.delete(id)
-  play.timer = $.clock.after(frames.delays[play.frame]!, () => void step($, id))
+  if (shown.deny) {
+    if (++play.refused >= MAX_REFUSALS) return void playing.delete(id)
+  } else {
+    play.frame = frame
+    play.refused = 0
+  }
+  play.timer = $.clock.after(frames.delays[frame]!, () => void step($, id))
 }
 
 /** Plays an animation drawn at a site while it shows; one off screen stops, on the frame it was on. */
@@ -859,7 +867,7 @@ function play ($: Engine, requestId: string, element: string, key: string, colum
   }
   if (!isShown || playing.has(id)) return now?.frame ?? 0
   const frames = loaded.get(key)!
-  const started: Playing = { requestId, element, key, frame: now?.frame ?? 0, columns, rows }
+  const started: Playing = { requestId, element, key, frame: now?.frame ?? 0, columns, rows, refused: 0 }
   playing.set(id, started)
   started.timer = $.clock.after(frames.delays[started.frame]!, () => void step($, id))
   return started.frame

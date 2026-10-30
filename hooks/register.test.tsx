@@ -77,7 +77,7 @@ const padded = (base64: string, size: number) => {
  * processes it runs (head, dd, base64, sips, git) and what the engine draws. Like the engine's,
  * `fs.read` rejects a file of 4 MiB or more, and `fs.stat` one that is not there.
  */
-function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' | 'unreadable' | 'crash', startMs = 0, tui = 'fullscreen' as string | null } = {}) {
+function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' | 'unreadable' | 'crash', startMs = 0, tui = 'fullscreen' as string | null, refusals = 0 } = {}) {
   const clock = mock.clock(on, { now })
   const asked = { sessionId: 0, promptReads: 0 }
   mock.env(on, env)
@@ -247,8 +247,10 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
       started.isEnded = true
     }
   })
+  // The engine swaps a frame in; the first `refusals` it refuses, as one not yet sure the terminal reads files.
   on('ui.blit', ($, e) => {
     blits.push(e as never)
+    if (refusals-- > 0) return { value: { deny: 'the terminal has not yet said whether it reads files on this machine; asked now, blit again' } }
     return { value: {} }
   })
   on('ui.render', ($, e) => {
@@ -320,6 +322,16 @@ test('a GIF plays while it shows, each frame swapped in after its delay', async 
   expect(w.blits[0]).toMatchObject({ requestId: 'tu-1', source: { file: expect.stringMatching(/\/1\.rgba$/) } })
   await w.clock.advance(200)
   expect(w.blits[1]).toMatchObject({ source: { file: expect.stringMatching(/\/0\.rgba$/) } })
+})
+
+test('a GIF whose frame swap is refused for a while tries again, and plays on', async ($, on) => {
+  const w = world(on, { refusals: 2 })
+  await startSession($)
+  await readResult($, image(gif([0, 1]).toBase64(), 'image/gif'))
+  await w.clock.advance(1000)
+  // Two refusals of frame 1, then frame 1, then frame 0: it plays.
+  expect(w.blits.length).toBeGreaterThan(3)
+  expect(w.blits.slice(2, 4).map(blit => (blit.source as { file: string }).file.match(/\/(\d)\.rgba$/)![1])).toEqual(['1', '0'])
 })
 
 test('a GIF off screen does not play', async ($, on) => {
