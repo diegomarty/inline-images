@@ -40,6 +40,14 @@ jobs:
           fi
           echo "inline-images $plugin"
 
+      - name: The mod says the plugin's own version
+        run: |
+          plugin=$(jq -r .version .claude-plugin/plugin.json)
+          if ! grep -q "^const VERSION = '$plugin'$" hooks/register.tsx; then
+            echo "::error file=hooks/register.tsx::VERSION is not $plugin, the version in .claude-plugin/plugin.json"
+            exit 1
+          fi
+
       # --profile directory fails on anything the plugin directory refuses a submission for, the icon included.
       - name: Validate
         run: claude plugin validate . --profile directory

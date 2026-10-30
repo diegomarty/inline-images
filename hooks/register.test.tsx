@@ -77,7 +77,7 @@ const padded = (base64: string, size: number) => {
  * processes it runs (head, dd, base64, sips, git) and what the engine draws. Like the engine's,
  * `fs.read` rejects a file of 4 MiB or more, and `fs.stat` one that is not there.
  */
-function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' | 'unreadable' | 'crash', startMs = 0, tui = 'fullscreen' as string | null, refusals = 0, beatMs = 40, busyWrites = 0 } = {}) {
+function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, string>, files = {} as Record<string, string>, tracked = [] as string[], sizes = {} as Record<string, { width: number; height: number }>, dirs = {} as Record<string, number>, now = 0, uname = 'Darwin', missing = [] as string[], window = 'shown' as 'shown' | 'error' | 'unreadable' | 'crash', startMs = 0, tui = 'fullscreen' as string | null, refusals = 0, beatMs = 40, busyWrites = 0, latest = undefined as string | undefined } = {}) {
   const clock = mock.clock(on, { now })
   const asked = { sessionId: 0, promptReads: 0 }
   mock.env(on, env)
@@ -251,6 +251,17 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     }
   })
   // The engine swaps a frame in; the first `refusals` it refuses, as one not yet sure the terminal reads files.
+  // GitHub, asked for the latest release: its tag, or a 404 where there is none. The toasts shown.
+  const fetches: string[] = []
+  const toasts: string[] = []
+  on('http.fetch', ($, e) => {
+    fetches.push(e.url)
+    return { value: latest === undefined ? { status: 404, ok: false, headers: {}, text: '{}' } : { status: 200, ok: true, headers: {}, text: JSON.stringify({ tag_name: latest }) } } as never
+  })
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined } as never
+  })
   on('ui.blit', ($, e) => {
     blits.push(e as never)
     if (refusals-- > 0) return { value: { deny: 'the terminal has not yet said whether it reads files on this machine; asked now, blit again' } }
@@ -260,7 +271,7 @@ function world (on: On, { env = { TERM_PROGRAM: 'ghostty' } as Record<string, st
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
-  return { clock, runs, reads, exists, stats, lists, blits, files, mtimes, tracked, session, asked, box, scripts, windows, shows, written }
+  return { clock, runs, reads, exists, stats, lists, blits, files, mtimes, tracked, session, asked, box, scripts, windows, shows, written, fetches, toasts }
 }
 
 const startSession = ($: Engine) => $.session.start({ cwd: '/project/app', surface: 'terminal', isInteractive: true })
@@ -1571,4 +1582,47 @@ test('a picture named after a very long word still gets its chip', COMPACT, asyn
   await startSession($)
   const row = await answer($, `${'a'.repeat(20000)} then after.png`, 'a-1')
   expect(await row.find({ key: 'ref:0' })).toMatchObject({ props: { props: { label: 'after.png' } } })
+})
+
+// --- A newer version, said once.
+
+test('a newer release is said in a toast once; GitHub is asked once a day at most', async ($, on) => {
+  const w = world(on, { latest: 'v99.0.0' })
+  await startSession($)
+  await w.clock.advance(10)
+  expect(w.fetches).toEqual(['https://api.github.com/repos/diegomarty/inline-images/releases/latest'])
+  expect(w.toasts).toEqual([expect.stringMatching(/^Inline Images 99\.0\.0 is out/)])
+  // What was asked is kept where the next session reads it.
+  w.files['/tmp/claude-501/inline-images/update.json'] = new TextEncoder().encode(w.written['/tmp/claude-501/inline-images/update.json']!).toBase64()
+  // Another session the same day asks nothing; one a day later asks again, and says nothing new.
+  await startSession($)
+  await w.clock.advance(10)
+  expect(w.fetches).toHaveLength(1)
+  await w.clock.advance(24 * 60 * 60 * 1000)
+  await startSession($)
+  await w.clock.advance(10)
+  expect(w.fetches).toHaveLength(2)
+  expect(w.toasts).toHaveLength(1)
+})
+
+test('no toast where the latest release is this version, or older', async ($, on) => {
+  const w = world(on, { latest: 'v0.0.1' })
+  await startSession($)
+  await w.clock.advance(10)
+  expect(w.fetches).toHaveLength(1)
+  expect(w.toasts).toEqual([])
+})
+
+test('nothing is asked with the option off', { options: { updates: false } }, async ($, on) => {
+  const w = world(on, { latest: 'v99.0.0' })
+  await startSession($)
+  await w.clock.advance(10)
+  expect(w.fetches).toEqual([])
+})
+
+test('nothing is asked with CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set', async ($, on) => {
+  const w = world(on, { latest: 'v99.0.0', env: { TERM_PROGRAM: 'ghostty', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' } })
+  await startSession($)
+  await w.clock.advance(10)
+  expect(w.fetches).toEqual([])
 })

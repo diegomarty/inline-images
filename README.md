@@ -93,6 +93,7 @@ It answers with how pictures are drawn now. A reload of the mod keeps what it se
 | Preview in a window | on | A picture (or its name) under the pointer opens larger, at full quality, in a window by the pointer, in any terminal. Off, the transcript's drawing is all. |
 | Compact view | off | Every picture is a chip with its name; the pointer on one opens the picture in the window by the pointer. |
 | Open on click | off | A click on a picture or a chip opens it in the system's default viewer. |
+| Check for updates | on | Once a day at most, look on GitHub for a newer version, and say so in a toast, once a version. |
 
 ## Install
 
@@ -101,7 +102,11 @@ It answers with how pictures are drawn now. A reload of the mod keeps what it se
 /plugin install inline-images@inline-images
 ```
 
-The repository is private for now: adding it needs access to it, and git signed in to GitHub on the machine.
+### Updates
+
+Claude Code does not update a marketplace like this one on its own unless told to. When a newer version is out, the mod says so in a toast (the **Check for updates** option; nothing is asked with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set). To update, run `/plugin`, then **Marketplaces** → **inline-images** → **Update**, and restart Claude Code. To have it update itself at start-up, turn on auto-update for the marketplace there.
+
+To hear of a release on GitHub instead, **Watch** the repository → **Custom** → **Releases**.
 
 ## Limits
 

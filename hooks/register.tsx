@@ -93,6 +93,12 @@ const DRAWN_MS = 2000
 // While a session runs its cache folder is touched this often, so another session's sweep of caches
 // gone a week never takes it.
 const TOUCH_MS = 6 * 60 * 60 * 1000
+// The version this is (CI checks it is plugin.json's), and where its releases are: once a day at
+// most, a session looks for a newer one, and says so once a version.
+const VERSION = '0.6.0'
+const LATEST_RELEASE = 'https://api.github.com/repos/diegomarty/inline-images/releases/latest'
+const UPDATE_CHECK_MS = 24 * 60 * 60 * 1000
+const UPDATE_TOAST_MS = 15000
 // A picture an answer names without drawing it: in a link's target, in code, or bare. A bare one
 // starts where a word does: tried from inside a long word, each try would scan to its end.
 const REFERENCE = /\]\(\s*<?([^)\s>]+\.(?:png|jpe?g|gif|webp))>?[^)]*\)|`([^`\n]+\.(?:png|jpe?g|gif|webp))`|(?<![\w@%+.~:\\/-])((?:[A-Za-z]:)?(?:~|\.{1,2})?[\\/]?[\w@%+.-]+(?:[\\/][\w@%+.-]+)*\.(?:png|jpe?g|gif|webp))(?![\w\\/])/gi
@@ -561,6 +567,32 @@ async function sweepEnded ($: Engine, id: string) {
  * Removes, as a session starts, the caches of sessions gone a week: by their folder's mtime, which a
  * running session keeps fresh (touchCache), and never this session's own.
  */
+/** Whether version `a` (major.minor.patch) is later than `b`. */
+function isLater (a: string, b: string) {
+  const [x, y] = [a, b].map(version => version.split('.').map(Number))
+  for (let i = 0; i < 3; i++) if (x![i] !== y![i]) return x![i]! > y![i]!
+  return false
+}
+
+/**
+ * Looks for a newer release, once a day at most across sessions, and says so in a toast, once a
+ * version. Not with nonessential traffic turned off.
+ */
+async function checkUpdate ($: Engine) {
+  if (/^(1|true|yes|on)$/i.test((await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')) ?? '')) return
+  const file = `${(temp ??= await tempFolder($))}/inline-images/update.json`
+  const now = await $.clock.now()
+  type Known = { checkedAt?: unknown; told?: unknown }
+  const known = await $.fs.read(file, { as: 'bytes' }).then(({ base64 }) => JSON.parse(new TextDecoder().decode(Uint8Array.fromBase64(base64))) as Known, () => ({}) as Known)
+  if (typeof known.checkedAt === 'number' && now - known.checkedAt < UPDATE_CHECK_MS) return
+  const response = await $.http.fetch(LATEST_RELEASE, { headers: { accept: 'application/vnd.github+json' } })
+  const tag = response.ok ? (JSON.parse(response.text) as { tag_name?: unknown }).tag_name : undefined
+  const latest = typeof tag === 'string' ? tag.replace(/^v/, '') : ''
+  const isNews = /^\d+\.\d+\.\d+$/.test(latest) && isLater(latest, VERSION) && known.told !== latest
+  await $.fs.write(file, JSON.stringify({ checkedAt: now, told: isNews ? latest : known.told }))
+  if (isNews) $.ui.toast(`Inline Images ${latest} is out (this is ${VERSION}). To update: /plugin, then Marketplaces, inline-images, Update.`, { timeoutMs: UPDATE_TOAST_MS })
+}
+
 async function sweepOld ($: Engine) {
   const root = `${(temp ??= await tempFolder($))}/inline-images`
   const now = await $.clock.now()
@@ -1243,6 +1275,7 @@ export const register: Register = (on, options) => {
   animate = options.animate !== false
   clickOpens = options.click === true
   compact = options.compact === true
+  const checksUpdates = options.updates !== false
   const markdown = options.markdown !== false
 
   on('session.start', async ($, e, next) => {
@@ -1262,6 +1295,8 @@ export const register: Register = (on, options) => {
     isItermPending = graphics === 'none' && !isTmux && program === 'iTerm.app' && (major > 3 || (major === 3 && minor >= 5))
     // A window by the pointer, on the desktop the session runs on: not over ssh, another machine's.
     canWindow = options.window !== false && e.isInteractive && !isRemote && (await canShowWindows($))
+    // A newer version, said in a toast: in a session someone works in.
+    if (checksUpdates && e.isInteractive) void checkUpdate($).catch(() => undefined)
     // A reload starts with nothing read: what the state says was read is read again.
     await stopHost($)
     reset()

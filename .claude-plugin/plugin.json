@@ -50,6 +50,12 @@
       "description": "Every picture (one Claude reads, one you paste, one an answer shows) is a chip with its name instead of drawn, and the pointer on a chip opens the picture at full quality in a window by the pointer. Needs the fullscreen interface and the window (Preview in a window on, and a desktop: not over ssh); elsewhere the pictures are drawn.",
       "default": false
     },
+    "updates": {
+      "type": "boolean",
+      "title": "Check for updates",
+      "description": "Once a day at most, look on GitHub for a newer version of Inline Images, and say so in a toast, once a version. Off, nothing is asked. Nothing is asked either with CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set.",
+      "default": true
+    },
     "click": {
       "type": "boolean",
       "title": "Open on click",
